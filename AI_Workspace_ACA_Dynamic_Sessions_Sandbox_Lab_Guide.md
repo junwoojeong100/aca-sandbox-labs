@@ -222,11 +222,9 @@ curl --fail-with-body --silent --show-error \
   --header "Authorization: Bearer $TOKEN" \
   --header "Content-Type: application/json" \
   --data '{
-    "properties": {
-      "codeInputType": "inline",
-      "executionType": "synchronous",
-      "code": "print(\"AI Workspace Dynamic Sessions validation passed\")"
-    }
+    "codeInputType": "inline",
+    "executionType": "synchronous",
+    "code": "print(\"AI Workspace Dynamic Sessions validation passed\")"
   }' \
   --output first-execution.json \
   --write-out '\nexecute HTTP %{http_code}\n'
@@ -235,6 +233,8 @@ cat first-execution.json
 ```
 
 **통과 기준:** 터미널에 `execute HTTP 200`이 표시되고 `first-execution.json`의 실행 결과에 `AI Workspace Dynamic Sessions validation passed`가 포함돼야 한다. 403이면 역할 전파를 기다린 뒤 `TOKEN`을 다시 발급하고, 404이면 `POOL_MANAGEMENT_ENDPOINT`와 pool 이름을 확인한다.
+
+> 이 요청 형식은 2026-07-24 한국 중부 리전의 `2025-10-02-preview` endpoint에서 실제 검증했다. execution body의 `codeInputType`, `executionType`, `code`는 최상위 속성이다. `properties`로 감싸면 `SessionPropertiesMissing` 오류가 발생할 수 있다.
 
 문서의 `Authorization: ******` 표기는 민감한 값을 숨긴 예시다. 실제 실행할 때는 모든 관리 API 호출에 `--header "Authorization: Bearer $TOKEN"`을 사용한다.
 
@@ -304,11 +304,9 @@ curl --fail-with-body --silent --show-error \
   --header "Authorization: Bearer $TOKEN" \
   --header "Content-Type: application/json" \
   --data '{
-    "properties": {
-      "codeInputType": "inline",
-      "executionType": "synchronous",
-      "code": "exec(compile(open(\"/mnt/data/analyze_sales.py\", encoding=\"utf-8\").read(), \"analyze_sales.py\", \"exec\"))"
-    }
+    "codeInputType": "inline",
+    "executionType": "synchronous",
+    "code": "exec(compile(open(\"/mnt/data/analyze_sales.py\", encoding=\"utf-8\").read(), \"analyze_sales.py\", \"exec\"))"
   }' \
   --output analysis-execution.json \
   --write-out '\nanalysis HTTP %{http_code}\n'
@@ -351,6 +349,7 @@ cat summary.json
 | HTTP 403 | role scope와 caller object ID를 확인한다. 역할 할당 후 30~60초 기다리고 token을 다시 발급한다. |
 | HTTP 404 | `POOL_MANAGEMENT_ENDPOINT`, pool 이름, Resource Group과 API 경로를 확인한다. |
 | HTTP 413 | 파일이 128MB 제한을 넘었다. 파일을 분할하거나 별도 staging 경로를 사용한다. |
+| `SessionPropertiesMissing` | execution JSON에서 `codeInputType`, `executionType`, `code`가 최상위 속성인지 확인하고 `properties` 래퍼를 제거한다. |
 | `SessionWithIdentifierNotFound` | cooldown으로 세션이 정리됐을 수 있다. 새 `SESSION_ID`를 만들고 파일 업로드부터 다시 수행한다. |
 | Python import 또는 실행 오류 | `analysis-execution.json`의 `stderr`를 확인한다. 기본 interpreter에 없는 라이브러리가 필요하면 Custom Container 경로로 전환한다. |
 

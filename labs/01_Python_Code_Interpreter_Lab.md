@@ -27,9 +27,9 @@ Azure Container Apps Dynamic Sessions의 PythonLTS pool에서 다음을 실제 �
 
 ```bash
 export SUBSCRIPTION_ID="<SUBSCRIPTION_ID>"
-export RESOURCE_GROUP="rg-akeeon-sandbox-lab"
+export RESOURCE_GROUP="rg-ai-workspace-sandbox-lab"
 export LOCATION="koreacentral"
-export PYTHON_POOL_NAME="akeeon-python-sbx"
+export PYTHON_POOL_NAME="ai-workspace-python-sbx"
 
 az account set --subscription "$SUBSCRIPTION_ID"
 az account show --query '{subscription:id,user:user.name}' --output json
@@ -94,7 +94,7 @@ az quota usage show \
 az group create \
   --name "$RESOURCE_GROUP" \
   --location "$LOCATION" \
-  --tags purpose=akeeon-sandbox-lab \
+  --tags purpose=ai-workspace-sandbox-lab \
   --output table
 
 az containerapp sessionpool create \
@@ -173,7 +173,7 @@ export PYTHON_ENDPOINT=$(az containerapp sessionpool show \
 export PYTHON_SESSION_ID="python-$(uuidgen | tr '[:upper:]' '[:lower:]')"
 ```
 
-이 값들은 실습 터미널에서만 사용한다. 실제 AKeeON에서는 backend Managed Identity와 Session Broker가 관리하며 browser나 사용자에게 전달하지 않는다.
+이 값들은 실습 터미널에서만 사용한다. 실제 AI Workspace에서는 backend Managed Identity와 Session Broker가 관리하며 browser나 사용자에게 전달하지 않는다.
 
 ## 8. 첫 Python 실행
 
@@ -186,7 +186,7 @@ curl --fail-with-body --silent --show-error \
   --data '{
     "codeInputType": "inline",
     "executionType": "synchronous",
-    "code": "print(\"AKeeON Python sandbox validation passed\")"
+    "code": "print(\"AI Workspace Python sandbox validation passed\")"
   }' \
   --output first-execution.json \
   --write-out '\nexecute HTTP %{http_code}\n'

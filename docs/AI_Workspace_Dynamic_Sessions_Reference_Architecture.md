@@ -1,14 +1,14 @@
-# AKeeON 격리형 Sandbox Azure 권장 아키텍처
+# AI Workspace 격리형 Sandbox Azure 권장 아키텍처
 
 ## 1. 목적
 
-AKeeON의 LLM과 Agent가 사용자의 자연어 요청을 분석하고 코드 또는 문서 생성 계획을 만든 뒤, Azure Container Apps Dynamic Sessions에서 신뢰할 수 없는 코드와 파일을 격리 실행하는 구조를 정의한다.
+AI Workspace의 LLM과 Agent가 사용자의 자연어 요청을 분석하고 코드 또는 문서 생성 계획을 만든 뒤, Azure Container Apps Dynamic Sessions에서 신뢰할 수 없는 코드와 파일을 격리 실행하는 구조를 정의한다.
 
 목표는 Sandbox가 실제 업무 시스템을 직접 변경하지 못하게 하고, 만족스러운 산출물만 검사·미리보기·사용자 승인을 거쳐 승인된 Connector로 승격하는 것이다.
 
 ## 2. 요구사항과 권장 대응
 
-| AKeeON 요구사항 | Azure 권장 대응 |
+| AI Workspace 요구사항 | Azure 권장 대응 |
 | --- | --- |
 | Python 코드 생성·실행 | Python Code Interpreter session pool |
 | 오류 수정과 재실행 | 제한된 `stdout`·`stderr`, 코드 hash와 재시도 정책 |
@@ -23,7 +23,7 @@ AKeeON의 LLM과 Agent가 사용자의 자연어 요청을 분석하고 코드 �
 
 ```mermaid
 flowchart LR
-    U[AKeeON 사용자] --> FE[AKeeON API / UI]
+    U[AI Workspace 사용자] --> FE[AI Workspace API / UI]
     FE --> AG[LLM Agent]
     AG --> PE[정책 엔진]
     PE --> SB[Session Broker]
@@ -45,13 +45,13 @@ flowchart LR
     CN --> WS[실제 업무 시스템]
 
     SB --> MON[Azure Monitor / Log Analytics]
-    AG --> AUD[AKeeON 감사 로그]
+    AG --> AUD[AI Workspace 감사 로그]
     PR --> AUD
 ```
 
 ## 4. 핵심 구성요소
 
-### 4.1 AKeeON Agent
+### 4.1 AI Workspace Agent
 
 - 사용자 의도를 구조화된 작업 계획으로 변환한다.
 - 실행할 코드를 생성하되 pool, network, resource limit을 직접 결정하지 않는다.
@@ -74,7 +74,7 @@ LLM의 판단과 별도로 결정론적인 정책을 적용한다.
 
 ### 4.3 Session Broker
 
-- AKeeON 백엔드의 Managed Identity로 Entra token을 발급한다.
+- AI Workspace 백엔드의 Managed Identity로 Entra token을 발급한다.
 - pool별 management endpoint와 API version을 서버에서 관리한다.
 - 사용자 입력과 분리된 예측 불가능한 session identifier를 생성한다.
 - `tenant_id`, `user_id`, `conversation_id`, `request_id`, identifier를 서버 내부에서 매핑한다.
@@ -113,7 +113,7 @@ Sandbox는 실제 저장소에 쓰지 않는다.
 
 ### 4.7 Office 작업 API
 
-Custom Container가 임의 command와 shell argument를 받게 하지 않는다. AKeeON이 호출할 수 있는 작업을 선언적 schema로 제한한다.
+Custom Container가 임의 command와 shell argument를 받게 하지 않는다. AI Workspace가 호출할 수 있는 작업을 선언적 schema로 제한한다.
 
 | API 예시 | 목적 |
 | --- | --- |
@@ -140,14 +140,14 @@ Custom Container가 임의 command와 shell argument를 받게 하지 않는다.
 - 임의 local path 읽기
 - 허용 목록 밖의 source-target 변환
 
-이 repository의 `/generate` API는 격리, image, probe와 결과 검증을 설명하기 위한 최소 reference implementation이다. Production AKeeON에서는 위 job API와 입력 검사·승인 경계를 추가한다.
+이 repository의 `/generate` API는 격리, image, probe와 결과 검증을 설명하기 위한 최소 reference implementation이다. Production AI Workspace에서는 위 job API와 입력 검사·승인 경계를 추가한다.
 
 ## 5. Trust Boundary와 위협 모델
 
 | 경계 또는 위협 | 통제 |
 | --- | --- |
-| 사용자 입력과 AKeeON | 인증, tenant binding, 요청 크기 제한, prompt injection 방어 |
-| AKeeON과 session endpoint | Managed Identity, HTTPS, Session Executor RBAC |
+| 사용자 입력과 AI Workspace | 인증, tenant binding, 요청 크기 제한, prompt injection 방어 |
+| AI Workspace와 session endpoint | Managed Identity, HTTPS, Session Executor RBAC |
 | identifier 탈취 | backend-only 생성·저장, URL·browser·client log 비노출 |
 | 악성 코드 | Hyper-V 격리 session, timeout, CPU·memory limit, egress 차단 |
 | 악성 첨부파일 | quarantine, malware 검사, archive depth·압축률 제한 |
@@ -160,7 +160,7 @@ Custom Container가 임의 command와 shell argument를 받게 하지 않는다.
 
 ## 6. 인증과 권한
 
-### 6.1 AKeeON 백엔드
+### 6.1 AI Workspace 백엔드
 
 - pool management API 호출 identity에 `Azure ContainerApps Session Executor`를 pool 범위로 부여한다.
 - Resource Manager에서 pool을 생성·수정하는 배포 identity와 runtime 호출 identity를 분리한다.
@@ -279,7 +279,7 @@ tenant_id
 
 | 계층 | 수집 항목 |
 | --- | --- |
-| AKeeON Agent | 요청 분류, plan ID, code hash, retry 횟수 |
+| AI Workspace Agent | 요청 분류, plan ID, code hash, retry 횟수 |
 | 정책 엔진 | 규칙 버전, 결정, 거부 사유, 예외 승인 |
 | Session Broker | allocation latency, HTTP status, 실행 시간, timeout |
 | Python pool | API 응답의 stdout, stderr, execution status, 생성 파일 |
@@ -346,7 +346,7 @@ Custom Container session pool 주요 metric:
 | Macro·embedded object 위험 | 기본 거부 또는 제거 |
 | Custom ready session 비용 | 최소 ready count, 사용량 관측 |
 | Session은 영구 저장소가 아님 | Artifact Staging으로 명시적 이동 |
-| Code Interpreter logging 차이 | 실행 API 응답을 AKeeON이 직접 보관 |
+| Code Interpreter logging 차이 | 실행 API 응답을 AI Workspace가 직접 보관 |
 | Region·quota 차이 | 배포 전 quota와 실제 provisioning 검증 |
 
 ## 13. 운영 사례

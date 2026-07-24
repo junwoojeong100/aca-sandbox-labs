@@ -17,7 +17,7 @@ LibreOffice, Pandoc, Poppler와 폰트를 포함한 비루트 Custom Container i
 
 > Custom Container pool은 ready session을 최소 1개 요구할 수 있다. 유지되는 동안 비용이 발생할 수 있다.
 
-이 실습의 reference API는 네 형식의 **생성**을 검증한다. 실제 편집·변환 기능은 임의 shell을 노출하지 말고 [권장 아키텍처의 Office 작업 API](../docs/AKeeON_Dynamic_Sessions_Reference_Architecture.md#47-office-작업-api)처럼 선언적 operation과 허용 변환 matrix로 확장한다.
+이 실습의 reference API는 네 형식의 **생성**을 검증한다. 실제 편집·변환 기능은 임의 shell을 노출하지 말고 [권장 아키텍처의 Office 작업 API](../docs/AI_Workspace_Dynamic_Sessions_Reference_Architecture.md#47-office-작업-api)처럼 선언적 operation과 허용 변환 matrix로 확장한다.
 
 ## 1. 사전 조건
 
@@ -33,15 +33,15 @@ ACR 이름은 Azure 전체에서 고유한 영문 소문자와 숫자 조합이�
 
 ```bash
 export SUBSCRIPTION_ID="<SUBSCRIPTION_ID>"
-export RESOURCE_GROUP="rg-akeeon-sandbox-lab"
+export RESOURCE_GROUP="rg-ai-workspace-sandbox-lab"
 export LOCATION="koreacentral"
 export ACR_NAME="<GLOBALLY_UNIQUE_ACR_NAME>"
-export IDENTITY_NAME="id-akeeon-office-acr-pull"
-export LOG_WORKSPACE_NAME="log-akeeon-sandbox"
-export CONTAINER_ENV_NAME="env-akeeon-sandbox"
-export OFFICE_POOL_NAME="akeeon-office-sbx"
+export IDENTITY_NAME="id-ai-workspace-office-acr-pull"
+export LOG_WORKSPACE_NAME="log-ai-workspace-sandbox"
+export CONTAINER_ENV_NAME="env-ai-workspace-sandbox"
+export OFFICE_POOL_NAME="ai-workspace-office-sbx"
 export IMAGE_REPOSITORY="office-sandbox"
-export IMAGE_TAG="20260724.2"
+export IMAGE_TAG="20260724.3"
 export IMAGE="$ACR_NAME.azurecr.io/$IMAGE_REPOSITORY:$IMAGE_TAG"
 
 az account set --subscription "$SUBSCRIPTION_ID"
@@ -94,7 +94,7 @@ az acr create \
   --location "$LOCATION" \
   --sku Basic \
   --admin-enabled false \
-  --tags purpose=akeeon-office-sandbox \
+  --tags purpose=ai-workspace-office-sandbox \
   --output none
 ```
 
@@ -123,7 +123,7 @@ az identity create \
   --name "$IDENTITY_NAME" \
   --resource-group "$RESOURCE_GROUP" \
   --location "$LOCATION" \
-  --tags purpose=akeeon-office-image-pull \
+  --tags purpose=ai-workspace-office-image-pull \
   --output none
 
 export IDENTITY_ID=$(az identity show \
@@ -161,7 +161,7 @@ az monitor log-analytics workspace create \
   --resource-group "$RESOURCE_GROUP" \
   --location "$LOCATION" \
   --retention-time 30 \
-  --tags purpose=akeeon-sandbox-monitoring \
+  --tags purpose=ai-workspace-sandbox-monitoring \
   --output none
 
 export LOG_WORKSPACE_ID=$(az monitor log-analytics workspace show \
@@ -190,7 +190,7 @@ az containerapp env create \
   --logs-destination log-analytics \
   --logs-workspace-id "$LOG_WORKSPACE_ID" \
   --logs-workspace-key "$LOG_WORKSPACE_KEY" \
-  --tags purpose=akeeon-office-sandbox \
+  --tags purpose=ai-workspace-office-sandbox \
   --output none
 
 az containerapp env show \
@@ -310,7 +310,7 @@ az role assignment create \
   --scope "$OFFICE_POOL_ID"
 ```
 
-실제 AKeeON에서는 사용자가 아니라 backend Managed Identity에 부여한다.
+실제 AI Workspace에서는 사용자가 아니라 backend Managed Identity에 부여한다.
 
 ## 11. Health endpoint
 
@@ -359,7 +359,7 @@ curl --fail-with-body --silent --show-error \
   --header "Authorization: Bearer $TOKEN" \
   --header "Content-Type: application/json" \
   --data '{
-    "title": "AKeeON 격리형 Sandbox 검증 보고서",
+    "title": "AI Workspace 격리형 Sandbox 검증 보고서",
     "content": "Azure Container Apps Dynamic Sessions의 Office Custom Container에서 생성했습니다.\n\n- Python 작업과 Office 작업 분리\n- 기본 egress 차단\n- 승인 전 실제 업무 시스템 반영 금지"
   }' \
   --output generate.json \

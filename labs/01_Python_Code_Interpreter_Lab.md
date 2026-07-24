@@ -17,11 +17,24 @@ Azure Container Apps Dynamic Sessions의 PythonLTS pool에서 다음을 실제 �
 
 - Bash 또는 Azure Cloud Shell
 - Azure CLI 2.79.0 이상
+- `curl`, `jq`, Python 3, `unzip`, `file`
+- `shasum` 또는 `sha256sum`
 - 대상 subscription의 Contributor
 - role assignment를 위한 Owner 또는 User Access Administrator
 - Dynamic Sessions 지원 리전과 SessionPools quota
 
 로컬 Bash에서는 먼저 `az login`을 실행한다. Cloud Shell은 이미 로그인돼 있으므로 생략한다.
+
+### 권장 Fast Path
+
+repository root에서 다음 명령을 실행하면 사전 조건 확인부터 분석, egress와 hash 검증까지 자동 수행하고 결과를 `.work/python/`에 저장한다.
+
+```bash
+bash scripts/check-prereqs.sh
+bash scripts/python-lab.sh
+```
+
+아래 절은 자동 스크립트가 수행하는 세부 명령을 설명한다.
 
 ## 2. 변수 설정
 
@@ -30,9 +43,12 @@ export SUBSCRIPTION_ID="<SUBSCRIPTION_ID>"
 export RESOURCE_GROUP="rg-ai-workspace-sandbox-lab"
 export LOCATION="koreacentral"
 export PYTHON_POOL_NAME="ai-workspace-python-sbx"
+export LAB_WORK_DIR="$PWD/.work/python-manual"
 
 az account set --subscription "$SUBSCRIPTION_ID"
 az account show --query '{subscription:id,user:user.name}' --output json
+mkdir -p "$LAB_WORK_DIR"
+cd "$LAB_WORK_DIR"
 ```
 
 ## 3. CLI와 provider 준비
@@ -103,7 +119,7 @@ az containerapp sessionpool create \
   --location "$LOCATION" \
   --container-type PythonLTS \
   --max-sessions 10 \
-  --cooldown-period 300 \
+  --cooldown-period 3600 \
   --network-status EgressDisabled \
   --output none
 ```
@@ -130,7 +146,7 @@ az containerapp sessionpool show \
 - endpoint가 비어 있지 않음
 - `network: EgressDisabled`
 - `maxSessions: 10`
-- `cooldown: 300`
+- `cooldown: 3600`
 
 ## 6. Session Executor 역할
 
@@ -317,6 +333,12 @@ done
 test -s monthly_sales.png
 test -s summary.json
 cat summary.json
+
+if command -v shasum >/dev/null 2>&1; then
+  shasum -a 256 monthly_sales.png summary.json
+else
+  sha256sum monthly_sales.png summary.json
+fi
 ```
 
 예상 월별 합계:

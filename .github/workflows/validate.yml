@@ -1,0 +1,23 @@
+name: Validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Validate repository and lab syntax
+        run: bash scripts/validate-repo.sh
+
+  office-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install smoke-test utilities
+        run: sudo apt-get update && sudo apt-get install --yes jq unzip
+      - name: Build and test Office container
+        run: bash scripts/smoke-office-local.sh

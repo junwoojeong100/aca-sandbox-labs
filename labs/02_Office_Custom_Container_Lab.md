@@ -26,6 +26,19 @@ LibreOffice, Pandoc, Poppler와 폰트를 포함한 비루트 Custom Container i
 - role assignment를 위한 Owner 또는 User Access Administrator
 - repository root에서 명령 실행
 - `office-container/`의 Dockerfile, server.py, probes.yaml
+- `curl`, `jq`, Python 3, `unzip`, `file`
+- `shasum` 또는 `sha256sum`
+
+### 권장 Fast Path
+
+repository root에서 다음 명령을 실행하면 ACR, identity, workspace, environment, pool, 네 형식과 hash, session, logs와 metrics를 자동 검증한다. 결과는 `.work/office/`에 저장한다.
+
+```bash
+bash scripts/check-prereqs.sh
+bash scripts/office-lab.sh
+```
+
+아래 절은 자동 스크립트가 수행하는 수동 명령을 설명한다.
 
 ## 2. 변수 설정
 
@@ -41,8 +54,10 @@ export LOG_WORKSPACE_NAME="log-ai-workspace-sandbox"
 export CONTAINER_ENV_NAME="env-ai-workspace-sandbox"
 export OFFICE_POOL_NAME="ai-workspace-office-sbx"
 export IMAGE_REPOSITORY="office-sandbox"
-export IMAGE_TAG="20260724.3"
+export IMAGE_TAG="$(date -u +%Y%m%d%H%M%S)"
 export IMAGE="$ACR_NAME.azurecr.io/$IMAGE_REPOSITORY:$IMAGE_TAG"
+export REPO_ROOT="$PWD"
+export LAB_WORK_DIR="$PWD/.work/office-manual"
 
 az account set --subscription "$SUBSCRIPTION_ID"
 ```
@@ -211,6 +226,7 @@ az containerapp env show \
 Image 구성:
 
 - Python 3.12 slim
+- digest로 고정한 Python base image와 Debian snapshot
 - LibreOffice Writer, Calc, Impress
 - Pandoc
 - Poppler
@@ -219,13 +235,15 @@ Image 구성:
 - Noto CJK와 Liberation fonts
 - 비루트 UID 10001
 - `/health`, `/generate`, `/files/{job}/{file}` API
+- 요청 1MB, content 100,000자, session당 job 20개, 임시 저장공간 256MB 제한
+- 1시간이 지난 job의 자동 정리와 streaming download
 
 ```bash
 az acr build \
   --registry "$ACR_NAME" \
   --image "$IMAGE_REPOSITORY:$IMAGE_TAG" \
-  --file "$PWD/office-container/Dockerfile" \
-  "$PWD/office-container"
+  --file "$REPO_ROOT/office-container/Dockerfile" \
+  "$REPO_ROOT/office-container"
 ```
 
 Image digest를 기록한다.
@@ -261,7 +279,7 @@ az containerapp sessionpool create \
   --ready-sessions 1 \
   --cooldown-period 3600 \
   --network-status EgressDisabled \
-  --probe-yaml "$PWD/office-container/probes.yaml" \
+  --probe-yaml "$REPO_ROOT/office-container/probes.yaml" \
   --output none
 ```
 
@@ -314,7 +332,12 @@ az role assignment create \
 
 ## 11. Health endpoint
 
+이후 생성되는 응답과 문서는 `.work/office-manual/`에 저장한다.
+
 ```bash
+mkdir -p "$LAB_WORK_DIR"
+cd "$LAB_WORK_DIR"
+
 export TOKEN=$(az account get-access-token \
   --resource https://dynamicsessions.io \
   --query accessToken \
@@ -344,8 +367,10 @@ cat health.json
   "status": "ok",
   "tools": {
     "libreoffice": "LibreOffice ...",
+    "openpyxl": "3.1.5",
     "pandoc": "pandoc ...",
-    "pdftotext": "pdftotext version ..."
+    "pdftotext": "pdftotext version ...",
+    "python-pptx": "1.0.2"
   }
 }
 ```
@@ -375,6 +400,14 @@ cat generate.json
 `jq`가 설치된 환경의 예:
 
 ```bash
+sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    sha256sum "$1" | awk '{print $1}'
+  fi
+}
+
 export DOCX_PATH=$(jq -r \
   '.files[] | select(.name == "report.docx") | .downloadPath' \
   generate.json)
@@ -398,11 +431,16 @@ for SPEC in \
   "report.xlsx:$XLSX_PATH"; do
   FILE_NAME=${SPEC%%:*}
   DOWNLOAD_PATH=${SPEC#*:}
+  EXPECTED_HASH=$(jq -r --arg name "$FILE_NAME" \
+    '.files[] | select(.name == $name) | .sha256' \
+    generate.json)
   curl --fail-with-body --silent --show-error \
     "$OFFICE_ENDPOINT$DOWNLOAD_PATH?identifier=$OFFICE_SESSION_ID" \
     --header "Authorization: Bearer $TOKEN" \
     --output "$FILE_NAME" \
     --write-out "$FILE_NAME download HTTP %{http_code}\n"
+  ACTUAL_HASH=$(sha256_file "$FILE_NAME")
+  test "$ACTUAL_HASH" = "$EXPECTED_HASH"
 done
 
 test -s report.docx
@@ -414,7 +452,6 @@ unzip -t report.pptx
 unzip -t report.xlsx
 head -c 4 report.pdf
 file report.docx report.pdf report.pptx report.xlsx
-shasum -a 256 report.docx report.pdf report.pptx report.xlsx
 ```
 
 통과 기준:
@@ -438,26 +475,28 @@ curl --fail-with-body --silent --show-error \
 
 ## 15. Monitoring
 
-Log Analytics에서 환경 구성에 따라 `_CL` suffix가 있는 table 또는 없는 table을 사용한다.
+이 실습처럼 environment에서 Log Analytics로 직접 전송하면 `_CL` table을 우선 사용한다.
 
 ```kusto
-AppEnvSessionConsoleLogs
+AppEnvSessionConsoleLogs_CL
 | where TimeGenerated > ago(1h)
 | order by TimeGenerated desc
 | take 100
 ```
 
 ```kusto
-AppEnvSessionLifecycleLogs
+AppEnvSessionLifecycleLogs_CL
 | where TimeGenerated > ago(1h)
 | order by TimeGenerated desc
 ```
 
 ```kusto
-AppEnvSessionPoolEvents
+AppEnvSessionPoolEvents_CL
 | where TimeGenerated > ago(1h)
 | order by TimeGenerated desc
 ```
+
+Azure Monitor diagnostic settings를 통해 resource-specific table로 전송한 환경에서는 `_CL` suffix를 제거한다.
 
 확인할 metric:
 

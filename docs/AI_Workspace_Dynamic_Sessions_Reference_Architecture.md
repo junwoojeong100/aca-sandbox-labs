@@ -257,6 +257,7 @@ Custom Container가 임의 command와 shell argument를 받게 하지 않는다.
 - image update 후 기존 session이 새 image로 자동 교체된다고 가정하지 않는다.
 - CVE scan, SBOM, tool version, font version을 release artifact로 기록한다.
 - LibreOffice 변환 회귀 테스트를 표준 문서 세트로 수행한다.
+- Reference container도 session당 job 수, 입력 크기, 임시 저장공간과 job TTL을 제한한다.
 
 ## 11. 모니터링과 감사
 
@@ -296,23 +297,25 @@ tenant_id
 | Pool event | `AppEnvSessionPoolEvents` 또는 `_CL` |
 
 ```kusto
-AppEnvSessionConsoleLogs
+AppEnvSessionConsoleLogs_CL
 | where TimeGenerated > ago(1h)
 | order by TimeGenerated desc
 | take 100
 ```
 
 ```kusto
-AppEnvSessionLifecycleLogs
+AppEnvSessionLifecycleLogs_CL
 | where TimeGenerated > ago(1h)
 | order by TimeGenerated desc
 ```
 
 ```kusto
-AppEnvSessionPoolEvents
+AppEnvSessionPoolEvents_CL
 | where TimeGenerated > ago(1h)
 | order by TimeGenerated desc
 ```
+
+Environment에서 Log Analytics로 직접 전송할 때는 `_CL` table을 사용한다. Azure Monitor diagnostic settings의 resource-specific table을 사용하는 경우 `_CL` suffix를 제거한다.
 
 ### 11.4 Metrics와 SLO
 
@@ -357,7 +360,7 @@ Python pool에서 CSV를 읽고 PNG와 JSON을 만든다. 결과는 staging에 �
 
 ### 사례 B: Office 보고서
 
-Office pool의 제한된 `/generate` API가 DOCX와 PDF를 만든다. Agent가 임의 shell을 호출하지 않고 문서 생성 schema만 전달한다.
+Office pool의 제한된 `/generate` API가 DOCX, PDF, PPTX와 XLSX를 만든다. Agent가 임의 shell을 호출하지 않고 문서 생성 schema만 전달한다.
 
 ### 사례 C: 코드 오류
 

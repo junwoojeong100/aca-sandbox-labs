@@ -1,7 +1,10 @@
 import hashlib
 import json
 import mimetypes
+import shutil
 import subprocess
+import threading
+import time
 import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -16,7 +19,13 @@ from pptx import Presentation
 
 BASE_DIR = Path("/work")
 MAX_REQUEST_BYTES = 1024 * 1024
+MAX_TITLE_CHARS = 200
+MAX_CONTENT_CHARS = 100_000
+MAX_JOBS = 20
+MAX_STORAGE_BYTES = 256 * 1024 * 1024
+JOB_TTL_SECONDS = 3600
 PORT = 8080
+JOB_LOCK = threading.Lock()
 
 
 def tool_version(command: list[str]) -> str:
@@ -41,13 +50,44 @@ TOOL_VERSIONS = {
 
 
 def file_metadata(path: Path, job_id: str) -> dict[str, object]:
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(64 * 1024), b""):
+            digest.update(chunk)
     return {
         "name": path.name,
         "size": path.stat().st_size,
-        "sha256": digest,
+        "sha256": digest.hexdigest(),
         "downloadPath": f"/files/{job_id}/{path.name}",
     }
+
+
+def directory_size(path: Path) -> int:
+    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+
+
+def cleanup_expired_jobs(now: float | None = None) -> None:
+    cutoff = (now or time.time()) - JOB_TTL_SECONDS
+    for job_dir in BASE_DIR.iterdir():
+        if job_dir.is_dir() and job_dir.stat().st_mtime < cutoff:
+            shutil.rmtree(job_dir)
+
+
+def remove_job(job_dir: Path) -> None:
+    try:
+        shutil.rmtree(job_dir)
+    except OSError as error:
+        print(
+            json.dumps(
+                {
+                    "level": "error",
+                    "message": "Failed to remove job directory",
+                    "jobDirectory": str(job_dir),
+                    "error": str(error),
+                }
+            ),
+            flush=True,
+        )
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -66,7 +106,16 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/health":
             self.send_json(
                 HTTPStatus.OK,
-                {"status": "ok", "tools": TOOL_VERSIONS},
+                {
+                    "status": "ok",
+                    "tools": TOOL_VERSIONS,
+                    "limits": {
+                        "maxRequestBytes": MAX_REQUEST_BYTES,
+                        "maxJobs": MAX_JOBS,
+                        "maxStorageBytes": MAX_STORAGE_BYTES,
+                        "jobTtlSeconds": JOB_TTL_SECONDS,
+                    },
+                },
             )
             return
 
@@ -87,16 +136,16 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.NOT_FOUND, {"error": "File not found"})
                 return
 
-            content = path.read_bytes()
             self.send_response(HTTPStatus.OK)
             self.send_header(
                 "Content-Type",
                 mimetypes.guess_type(filename)[0] or "application/octet-stream",
             )
-            self.send_header("Content-Length", str(len(content)))
+            self.send_header("Content-Length", str(path.stat().st_size))
             self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
             self.end_headers()
-            self.wfile.write(content)
+            with path.open("rb") as source:
+                shutil.copyfileobj(source, self.wfile, length=64 * 1024)
             return
 
         self.send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
@@ -104,6 +153,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         if urlparse(self.path).path != "/generate":
             self.send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
+            return
+
+        content_type = self.headers.get("Content-Type", "")
+        if not content_type.lower().startswith("application/json"):
+            self.send_json(
+                HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+                {"error": "Content-Type must be application/json"},
+            )
             return
 
         try:
@@ -121,8 +178,14 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             payload = json.loads(self.rfile.read(content_length))
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": "Invalid JSON"})
+            return
+        if not isinstance(payload, dict):
+            self.send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "JSON body must be an object"},
+            )
             return
 
         title = payload.get("title")
@@ -133,21 +196,58 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(content, str) or not content.strip():
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": "content is required"})
             return
+        if len(title) > MAX_TITLE_CHARS:
+            self.send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": f"title must be at most {MAX_TITLE_CHARS} characters"},
+            )
+            return
+        if len(content) > MAX_CONTENT_CHARS:
+            self.send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": f"content must be at most {MAX_CONTENT_CHARS} characters"},
+            )
+            return
 
         job_id = uuid.uuid4().hex
         job_dir = BASE_DIR / job_id
-        job_dir.mkdir(parents=True)
+        try:
+            with JOB_LOCK:
+                cleanup_expired_jobs()
+                job_directories = [
+                    path for path in BASE_DIR.iterdir() if path.is_dir()
+                ]
+                if len(job_directories) >= MAX_JOBS:
+                    self.send_json(
+                        HTTPStatus.TOO_MANY_REQUESTS,
+                        {"error": "Session job limit reached"},
+                    )
+                    return
+                if directory_size(BASE_DIR) >= MAX_STORAGE_BYTES:
+                    self.send_json(
+                        HTTPStatus.INSUFFICIENT_STORAGE,
+                        {"error": "Session storage limit reached"},
+                    )
+                    return
+                job_dir.mkdir(parents=True)
+        except OSError as error:
+            self.send_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": f"Unable to allocate job workspace: {error}"},
+            )
+            return
+
         markdown_path = job_dir / "report.md"
         docx_path = job_dir / "report.docx"
         pdf_path = job_dir / "report.pdf"
         pptx_path = job_dir / "report.pptx"
         xlsx_path = job_dir / "report.xlsx"
-        markdown_path.write_text(
-            f"% {title.strip()}\n\n# {title.strip()}\n\n{content.strip()}\n",
-            encoding="utf-8",
-        )
 
         try:
+            markdown_path.write_text(
+                f"% {title.strip()}\n\n# {title.strip()}\n\n{content.strip()}\n",
+                encoding="utf-8",
+            )
             workbook = Workbook()
             worksheet = workbook.active
             worksheet.title = "Report"
@@ -171,7 +271,11 @@ class Handler(BaseHTTPRequestHandler):
             text_frame = content_slide.placeholders[1].text_frame
             text_frame.clear()
             for index, line in enumerate(content.strip().splitlines()):
-                paragraph = text_frame.paragraphs[0] if index == 0 else text_frame.add_paragraph()
+                paragraph = (
+                    text_frame.paragraphs[0]
+                    if index == 0
+                    else text_frame.add_paragraph()
+                )
                 paragraph.text = line
             presentation.save(pptx_path)
 
@@ -199,21 +303,31 @@ class Handler(BaseHTTPRequestHandler):
                 timeout=120,
             )
         except subprocess.TimeoutExpired as error:
+            remove_job(job_dir)
             self.send_json(
                 HTTPStatus.GATEWAY_TIMEOUT,
                 {"error": f"Document conversion timed out: {error.cmd[0]}"},
             )
             return
         except subprocess.CalledProcessError as error:
+            remove_job(job_dir)
             self.send_json(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
                 {
                     "error": f"Document conversion failed: {error.cmd[0]}",
-                    "stderr": error.stderr[-2000:],
+                    "stderr": (error.stderr or "")[-2000:],
                 },
             )
             return
+        except (KeyError, ValueError) as error:
+            remove_job(job_dir)
+            self.send_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": f"Document generation failed: {error}"},
+            )
+            return
         except OSError as error:
+            remove_job(job_dir)
             self.send_json(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
                 {"error": f"Document tool could not start: {error}"},
@@ -224,9 +338,27 @@ class Handler(BaseHTTPRequestHandler):
             path.is_file()
             for path in (docx_path, pdf_path, pptx_path, xlsx_path)
         ):
+            remove_job(job_dir)
             self.send_json(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
                 {"error": "Expected document artifacts were not generated"},
+            )
+            return
+
+        try:
+            with JOB_LOCK:
+                if directory_size(BASE_DIR) > MAX_STORAGE_BYTES:
+                    remove_job(job_dir)
+                    self.send_json(
+                        HTTPStatus.INSUFFICIENT_STORAGE,
+                        {"error": "Generated artifacts exceed the session storage limit"},
+                    )
+                    return
+        except OSError as error:
+            remove_job(job_dir)
+            self.send_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": f"Unable to validate generated artifacts: {error}"},
             )
             return
 
@@ -244,11 +376,14 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def log_message(self, format_string: str, *args: object) -> None:
+        status = args[1] if len(args) > 1 else None
         print(
             json.dumps(
                 {
                     "client": self.client_address[0],
-                    "message": format_string % args,
+                    "method": self.command,
+                    "path": urlparse(self.path).path,
+                    "status": status,
                 }
             ),
             flush=True,

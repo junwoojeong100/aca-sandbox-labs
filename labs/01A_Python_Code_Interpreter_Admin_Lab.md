@@ -207,6 +207,8 @@ export PYTHON_SESSION_ID="python-$(uuidgen | tr '[:upper:]' '[:lower:]')"
 
 이 값들은 실습 터미널에서만 사용한다. 실제 AI Workspace에서는 backend Managed Identity와 Session Broker가 관리하며 browser나 사용자에게 전달하지 않는다.
 
+이 단계는 session에 SSH나 웹 terminal로 들어가는 것이 아니다. 이후 `curl` 요청이 REST API를 호출하며, 실습 운영자는 terminal에서 실행 상태·`stdout`·`stderr` JSON과 다운로드 파일을 확인한다. Azure Portal은 pool 상태와 metrics를 보여주지만 session 내부 화면은 제공하지 않는다.
+
 ## 8. 첫 Python 실행
 
 ```bash

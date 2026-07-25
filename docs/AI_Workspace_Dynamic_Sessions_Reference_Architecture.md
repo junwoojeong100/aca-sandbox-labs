@@ -113,6 +113,18 @@ LLM의 판단과 별도로 결정론적인 정책을 적용한다.
 - tenant별 동시성, 실행 횟수, timeout, artifact 크기를 제한한다.
 - 모든 요청에 correlation ID를 부여한다.
 
+### 4.3.1 Session 연결 방식과 사용자 화면
+
+Dynamic Sessions는 VM처럼 SSH·RDP로 접속하거나 Azure Portal에서 terminal·desktop을 여는 서비스가 아니다. Session Broker가 pool management endpoint에 Entra token과 예측 불가능한 `identifier`를 포함한 HTTPS 요청을 보낸다.
+
+| 대상 | 연결 방식 | 반환되는 것 |
+| --- | --- | --- |
+| Python Code Interpreter | `/executions`, `/files`, `/session` data plane API | 실행 `status`, `stdout`, `stderr`, 파일 목록과 content |
+| Office Custom Container | management endpoint 뒤의 `/health`, `/generate`, `/convert`, `/edit` | container HTTP API의 JSON 응답과 파일 stream |
+| Azure Portal | Resource Manager control plane | pool 설정, provisioning 상태, metrics와 logs |
+
+사용자는 session 화면을 직접 보지 않는다. AI Workspace UI가 자연어 요청, 진행 상태, 안전한 오류 요약, artifact 미리보기·Diff와 승인 화면을 제공한다. Custom Container에 별도 HTML UI를 구현할 수는 있지만, 이 repository의 reference container는 의도적으로 제한된 JSON·파일 API만 노출한다.
+
 ### 4.4 Python Code Interpreter pool
 
 - 범용 Python 분석과 LLM 생성 코드 실행에 사용한다.

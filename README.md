@@ -55,6 +55,17 @@ bash scripts/agent-lab.sh
 
 `check-prereqs.sh`는 로컬 도구, Azure CLI 버전과 로그인만 확인한다. quota와 RBAC 권한은 각 실습 스크립트가 조회하거나 실제 리소스·역할 생성 과정에서 검증한다. 자동 실행이 기본 경로이며, 세부 명령과 문제 해결이 필요할 때 역할별 [실습 1](labs/01_Python_Code_Interpreter_Lab.md)과 [실습 2](labs/02_Office_Custom_Container_Lab.md)를 참고한다.
 
+## Session 연결 방식과 화면
+
+Dynamic Sessions는 SSH, RDP, Azure Portal의 웹 터미널로 접속하지 않는다. AI Workspace backend가 Microsoft Entra token과 backend-only `identifier`를 사용해 session pool management endpoint의 REST API를 호출한다. 같은 identifier를 사용하면 기존 session으로 라우팅되고, 없으면 pool에서 새 session이 할당된다.
+
+| Pool | Backend 연결 | 실습 운영자가 보는 결과 | 실제 사용자가 보는 화면 |
+| --- | --- | --- | --- |
+| Python Code Interpreter | `/executions`, `/files`, `/session` | terminal의 JSON `status`, `stdout`, `stderr`와 다운로드 파일 | AI Workspace의 작업 계획, 진행 상태, 결과 파일, 미리보기와 승인 |
+| Office Custom Container | `/health`, `/generate`, `/convert`, `/edit` | terminal의 JSON operation·job·파일 metadata와 다운로드 문서 | AI Workspace의 문서 요청, 미리보기, Diff, 검사 결과와 승인 |
+
+Azure Portal에서는 pool 구성, provisioning 상태, metrics와 logs를 확인할 수 있지만 session 내부 desktop이나 shell 화면은 제공되지 않는다. Custom Container에 별도 HTML UI를 구현하지 않는 한 management endpoint도 JSON·파일 API만 반환한다.
+
 ## 지원하는 AI Workspace 시나리오
 
 | 고객 요건 | 검증 위치 |

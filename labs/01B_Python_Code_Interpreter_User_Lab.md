@@ -28,6 +28,8 @@
 
 이 repository에서는 `agent.cli`가 AI Workspace API/UI를 대신한다. 명령은 실습 운영자가 실행하지만 `--request`, `--attach`, `--approve`만 사용자 행동에 해당한다.
 
+사용자는 session terminal이나 desktop을 보지 않는다. 사용자 화면에는 자연어 요청, 진행 상태, LLM 작업 계획, 안전한 오류 요약, 결과 파일·미리보기와 승인 상태만 표시한다.
+
 ## 2. 첨부파일 준비
 
 ```bash

@@ -376,7 +376,11 @@ export OFFICE_ENDPOINT=$(az containerapp sessionpool show \
   --output tsv)
 
 export OFFICE_SESSION_ID="office-$(uuidgen | tr '[:upper:]' '[:lower:]')"
+```
 
+Custom Container session에도 SSH·RDP나 Azure Portal terminal로 접속하지 않는다. Management endpoint 뒤의 path가 container HTTP API로 전달되며, 이 reference image는 HTML 화면 대신 JSON과 파일 stream만 반환한다.
+
+```bash
 curl --fail-with-body --silent --show-error \
   "$OFFICE_ENDPOINT/health?identifier=$OFFICE_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN" \

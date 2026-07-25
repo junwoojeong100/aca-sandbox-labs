@@ -27,6 +27,8 @@
 
 이 repository의 직접 API 호출은 AI Workspace backend를 대리한다. 실제 사용자에게 Azure token, pool endpoint와 session identifier를 제공하면 안 된다.
 
+사용자는 Office container 화면이나 shell을 보지 않는다. 사용자 화면에는 문서 요청, 생성·변환·편집 진행 상태, 미리보기·Diff, 검사 결과, 다운로드와 승인 기능만 제공한다.
+
 ## 2. 생성 요청
 
 사용자가 요청할 수 있는 예:

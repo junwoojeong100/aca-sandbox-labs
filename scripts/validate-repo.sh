@@ -28,6 +28,20 @@ done
 python3 -c \
   'import ast, pathlib; ast.parse(pathlib.Path("office-container/server.py").read_text())'
 
+# agent package와 테스트의 구문을 확인한다.
+python3 - <<'PY'
+import ast
+import pathlib
+
+for source in sorted(pathlib.Path(".").glob("agent/*.py")) + sorted(
+    pathlib.Path(".").glob("tests/*.py")
+):
+    ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+print("python sources parsed")
+PY
+
+python3 -m unittest discover -s tests >/dev/null
+
 python3 <<'PY'
 import pathlib
 import re

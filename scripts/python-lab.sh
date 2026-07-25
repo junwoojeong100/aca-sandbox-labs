@@ -96,6 +96,8 @@ with open("/mnt/data/sales.csv", newline="", encoding="utf-8") as source:
 months = sorted(monthly)
 plt.plot(months, [monthly[month] for month in months], marker="o")
 plt.title("Monthly sales")
+plt.xlabel("Month")
+plt.ylabel("Sales")
 plt.tight_layout()
 plt.savefig("/mnt/data/monthly_sales.png")
 
@@ -199,12 +201,150 @@ curl --fail-with-body --silent --show-error \
   --header "Authorization: Bearer $TOKEN" \
   --output "$WORK_DIR/session.json"
 
+# 사전 설치 라이브러리 목록. EgressDisabled에서는 pip install을 할 수 없다.
+response="$WORK_DIR/preinstalled.json"
+http=$(curl --silent --show-error --output "$response" --write-out '%{http_code}' \
+  --request POST \
+  "$ENDPOINT/executions?api-version=2025-10-02-preview&identifier=$SESSION_ID" \
+  --header "Authorization: Bearer $TOKEN" \
+  --header "Content-Type: application/json" \
+  --data '{"codeInputType":"inline","executionType":"synchronous","code":"import importlib, platform\nprint(\"python\", platform.python_version())\nfor name in [\"pandas\",\"numpy\",\"matplotlib\",\"scipy\",\"sklearn\",\"openpyxl\",\"docx\",\"pptx\",\"reportlab\"]:\n    try:\n        module = importlib.import_module(name)\n        print(name, getattr(module, \"__version__\", \"unknown\"))\n    except ImportError:\n        print(name, \"MISSING\")"}')
+expect_2xx "$http" "Preinstalled library inventory" "$response"
+jq -e '
+  .status == "Succeeded"
+  and ((.result.stdout | contains("MISSING")) | not)
+' "$response" >/dev/null
+
+# 세션 간 파일 격리. 두 번째 session에서 첫 session의 파일이 보이면 안 된다.
+SECOND_SESSION_ID="python-$(python3 -c 'import uuid; print(uuid.uuid4())')"
+response="$WORK_DIR/isolation-list.json"
+http=$(curl --silent --show-error --output "$response" --write-out '%{http_code}' \
+  "$ENDPOINT/files?api-version=2025-10-02-preview&identifier=$SECOND_SESSION_ID" \
+  --header "Authorization: Bearer $TOKEN")
+expect_2xx "$http" "Second session file list" "$response"
+jq -e '(.value | length) == 0' "$response" >/dev/null \
+  || die "Session isolation failed: second session can see files"
+
+http=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+  "$ENDPOINT/files/sales.csv/content?api-version=2025-10-02-preview&identifier=$SECOND_SESSION_ID" \
+  --header "Authorization: Bearer $TOKEN")
+[[ "$http" == "404" ]] \
+  || die "Cross-session download must return 404 but returned $http"
+
+curl --silent --show-error --output /dev/null \
+  --request DELETE \
+  "$ENDPOINT/session?api-version=2025-02-02-preview&identifier=$SECOND_SESSION_ID" \
+  --header "Authorization: Bearer $TOKEN"
+
+# 오류 -> 코드 수정 -> 재실행 루프.
+response="$WORK_DIR/failed-execution.json"
+http=$(curl --silent --show-error --output "$response" --write-out '%{http_code}' \
+  --request POST \
+  "$ENDPOINT/executions?api-version=2025-10-02-preview&identifier=$SESSION_ID" \
+  --header "Authorization: Bearer $TOKEN" \
+  --header "Content-Type: application/json" \
+  --data '{"codeInputType":"inline","executionType":"synchronous","code":"import csv\nwith open(\"/mnt/data/sales.csv\", newline=\"\", encoding=\"utf-8\") as source:\n    print(sum(float(row[\"sales_amount\"]) for row in csv.DictReader(source)))"}')
+expect_2xx "$http" "Deliberate failure" "$response"
+jq -e '
+  .status == "Failed"
+  and (.result.stderr | contains("KeyError"))
+' "$response" >/dev/null \
+  || die "Expected a KeyError failure to demonstrate the retry loop"
+
+response="$WORK_DIR/fixed-execution.json"
+http=$(curl --silent --show-error --output "$response" --write-out '%{http_code}' \
+  --request POST \
+  "$ENDPOINT/executions?api-version=2025-10-02-preview&identifier=$SESSION_ID" \
+  --header "Authorization: Bearer $TOKEN" \
+  --header "Content-Type: application/json" \
+  --data '{"codeInputType":"inline","executionType":"synchronous","code":"import csv\nwith open(\"/mnt/data/sales.csv\", newline=\"\", encoding=\"utf-8\") as source:\n    rows = list(csv.DictReader(source))\nprint(\"total:\", sum(float(row[\"amount\"]) for row in rows))"}')
+expect_2xx "$http" "Corrected execution" "$response"
+jq -e '
+  .status == "Succeeded"
+  and (.result.stdout | contains("total: 680.0"))
+' "$response" >/dev/null \
+  || die "Corrected execution did not produce the expected total"
+
+# 실행 시간 한도. 기본은 건너뛰고 RUN_LIMIT_TESTS=yes일 때만 약 4분을 소모한다.
+if [[ "${RUN_LIMIT_TESTS:-no}" == "yes" ]]; then
+  response="$WORK_DIR/timeout-validation.json"
+  http=$(curl --silent --show-error --output "$response" --write-out '%{http_code}' \
+    --max-time 600 \
+    --request POST \
+    "$ENDPOINT/executions?api-version=2025-10-02-preview&identifier=$SESSION_ID" \
+    --header "Authorization: Bearer $TOKEN" \
+    --header "Content-Type: application/json" \
+    --data '{"codeInputType":"inline","executionType":"synchronous","code":"import time\nfor _ in range(300):\n    time.sleep(1)\nprint(\"NO_TIMEOUT\")"}')
+  expect_2xx "$http" "Execution timeout probe" "$response"
+  jq -e '
+    .status == "Failed"
+    and ((.result.stdout // "") | contains("NO_TIMEOUT") | not)
+  ' "$response" >/dev/null \
+    || die "Execution time limit was not enforced"
+
+  response="$WORK_DIR/memory-validation.json"
+  http=$(curl --silent --show-error --output "$response" --write-out '%{http_code}' \
+    --max-time 600 \
+    --request POST \
+    "$ENDPOINT/executions?api-version=2025-10-02-preview&identifier=$SESSION_ID" \
+    --header "Authorization: Bearer $TOKEN" \
+    --header "Content-Type: application/json" \
+    --data '{"codeInputType":"inline","executionType":"synchronous","code":"blocks = []\nwhile True:\n    blocks.append(bytearray(100 * 1024 * 1024))"}')
+  expect_2xx "$http" "Memory limit probe" "$response"
+  jq -e '.status == "Failed"' "$response" >/dev/null \
+    || die "Memory limit was not enforced"
+  LIMITS_VERIFIED=yes
+else
+  log "Skipping execution limit probes. Set RUN_LIMIT_TESTS=yes to run them."
+  LIMITS_VERIFIED=skipped
+fi
+
+# Session 삭제와 임시 파일 자동 정리.
+CLEANUP_SESSION_ID="python-$(python3 -c 'import uuid; print(uuid.uuid4())')"
+printf 'a,b\n1,2\n' > "$WORK_DIR/cleanup-probe.csv"
+http=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+  --request POST \
+  "$ENDPOINT/files?api-version=2025-10-02-preview&identifier=$CLEANUP_SESSION_ID" \
+  --header "Authorization: Bearer $TOKEN" \
+  --form "file=@$WORK_DIR/cleanup-probe.csv;filename=cleanup-probe.csv")
+expect_2xx "$http" "Cleanup probe upload" /dev/null
+
+response="$WORK_DIR/before-cleanup.json"
+curl --silent --show-error --output "$response" \
+  "$ENDPOINT/files?api-version=2025-10-02-preview&identifier=$CLEANUP_SESSION_ID" \
+  --header "Authorization: Bearer $TOKEN"
+jq -e '(.value | length) == 1' "$response" >/dev/null \
+  || die "Cleanup probe file was not uploaded"
+
+http=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+  --request DELETE \
+  "$ENDPOINT/session?api-version=2025-02-02-preview&identifier=$CLEANUP_SESSION_ID" \
+  --header "Authorization: Bearer $TOKEN")
+expect_2xx "$http" "Delete session" /dev/null
+
+response="$WORK_DIR/after-cleanup.json"
+curl --silent --show-error --output "$response" \
+  "$ENDPOINT/files?api-version=2025-10-02-preview&identifier=$CLEANUP_SESSION_ID" \
+  --header "Authorization: Bearer $TOKEN"
+jq -e '(.value | length) == 0' "$response" >/dev/null \
+  || die "Session files survived deletion"
+
+http=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+  "$ENDPOINT/files/cleanup-probe.csv/content?api-version=2025-10-02-preview&identifier=$CLEANUP_SESSION_ID" \
+  --header "Authorization: Bearer $TOKEN")
+[[ "$http" == "404" ]] \
+  || die "Deleted session file download must return 404 but returned $http"
+
 cat > "$WORK_DIR/validation.txt" <<EOF
 pool=$PYTHON_POOL_NAME
 session=$SESSION_ID
 png_sha256=$PNG_HASH
 json_sha256=$JSON_HASH
 egress=blocked
+session_isolation=verified
+error_retry_loop=verified
+session_cleanup=verified
+execution_limits=$LIMITS_VERIFIED
 EOF
 
 log "Python validation passed."

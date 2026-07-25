@@ -249,6 +249,102 @@ unzip -t "$WORK_DIR/report.pptx" >/dev/null
 unzip -t "$WORK_DIR/report.xlsx" >/dev/null
 head -c 4 "$WORK_DIR/report.pdf" | grep -q '%PDF'
 
+JOB_ID=$(jq -r '.jobId' "$WORK_DIR/generate.json")
+
+# 허용 목록 밖 변환은 거부돼야 한다.
+http=$(curl --silent --show-error --output "$WORK_DIR/convert-denied.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  "$ENDPOINT/convert?identifier=$SESSION_ID" \
+  --header "Authorization: Bearer $TOKEN" \
+  --header "Content-Type: application/json" \
+  --data "{\"jobId\":\"$JOB_ID\",\"source\":\"report.docx\",\"target\":\"exe\"}")
+[[ "$http" == "400" ]] \
+  || die "Disallowed conversion must return 400 but returned $http"
+
+# 허용된 변환.
+http=$(curl --silent --show-error --output "$WORK_DIR/convert.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  "$ENDPOINT/convert?identifier=$SESSION_ID" \
+  --header "Authorization: Bearer $TOKEN" \
+  --header "Content-Type: application/json" \
+  --data "{\"jobId\":\"$JOB_ID\",\"source\":\"report.pptx\",\"target\":\"pdf\"}")
+expect_2xx "$http" "Office conversion" "$WORK_DIR/convert.json"
+converted_path=$(jq -r '.files[0].downloadPath' "$WORK_DIR/convert.json")
+converted_hash=$(jq -r '.files[0].sha256' "$WORK_DIR/convert.json")
+http=$(curl --silent --show-error --output "$WORK_DIR/report.pptx.pdf" \
+  --write-out '%{http_code}' \
+  "$ENDPOINT$converted_path?identifier=$SESSION_ID" \
+  --header "Authorization: Bearer $TOKEN")
+expect_2xx "$http" "Converted file download" "$WORK_DIR/report.pptx.pdf"
+[[ "$(sha256_file "$WORK_DIR/report.pptx.pdf")" == "$converted_hash" ]] \
+  || die "Hash mismatch: report.pptx.pdf"
+head -c 4 "$WORK_DIR/report.pptx.pdf" | grep -q '%PDF'
+
+# 허용 목록 밖 편집 operation과 수식 주입은 거부돼야 한다.
+http=$(curl --silent --show-error --output "$WORK_DIR/edit-denied.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  "$ENDPOINT/edit?identifier=$SESSION_ID" \
+  --header "Authorization: Bearer $TOKEN" \
+  --header "Content-Type: application/json" \
+  --data "{\"jobId\":\"$JOB_ID\",\"operations\":[{\"op\":\"runShell\",\"cmd\":\"id\"}]}")
+[[ "$http" == "400" ]] \
+  || die "Disallowed edit operation must return 400 but returned $http"
+
+http=$(curl --silent --show-error --output "$WORK_DIR/edit-formula.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  "$ENDPOINT/edit?identifier=$SESSION_ID" \
+  --header "Authorization: Bearer $TOKEN" \
+  --header "Content-Type: application/json" \
+  --data "{\"jobId\":\"$JOB_ID\",\"operations\":[{\"op\":\"setCell\",\"cell\":\"B2\",\"value\":\"=1+1\"}]}")
+[[ "$http" == "400" ]] \
+  || die "Formula injection must return 400 but returned $http"
+
+# 허용된 선언적 편집.
+http=$(curl --silent --show-error --output "$WORK_DIR/edit.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  "$ENDPOINT/edit?identifier=$SESSION_ID" \
+  --header "Authorization: Bearer $TOKEN" \
+  --header "Content-Type: application/json" \
+  --data "{\"jobId\":\"$JOB_ID\",\"operations\":[
+    {\"op\":\"setCell\",\"cell\":\"B2\",\"value\":\"approved-draft\"},
+    {\"op\":\"renameSheet\",\"name\":\"Final\"},
+    {\"op\":\"replaceText\",\"find\":\"separate isolated pools\",\"replace\":\"검토 완료\"}
+  ]}")
+expect_2xx "$http" "Office edit" "$WORK_DIR/edit.json"
+jq -e '.applied == 3 and (.files | length) == 2' "$WORK_DIR/edit.json" >/dev/null \
+  || die "Edit did not apply the expected operations"
+
+for file_name in report.edited.docx report.edited.xlsx; do
+  download_path=$(jq -r --arg name "$file_name" \
+    '.files[] | select(.name == $name) | .downloadPath' "$WORK_DIR/edit.json")
+  expected_hash=$(jq -r --arg name "$file_name" \
+    '.files[] | select(.name == $name) | .sha256' "$WORK_DIR/edit.json")
+  http=$(curl --silent --show-error --output "$WORK_DIR/$file_name" \
+    --write-out '%{http_code}' \
+    "$ENDPOINT$download_path?identifier=$SESSION_ID" \
+    --header "Authorization: Bearer $TOKEN")
+  expect_2xx "$http" "$file_name download" "$WORK_DIR/$file_name"
+  [[ "$(sha256_file "$WORK_DIR/$file_name")" == "$expected_hash" ]] \
+    || die "Hash mismatch: $file_name"
+  unzip -t "$WORK_DIR/$file_name" >/dev/null
+done
+
+# 존재하지 않는 job은 404다.
+http=$(curl --silent --show-error --output /dev/null \
+  --write-out '%{http_code}' \
+  --request POST \
+  "$ENDPOINT/convert?identifier=$SESSION_ID" \
+  --header "Authorization: Bearer $TOKEN" \
+  --header "Content-Type: application/json" \
+  --data '{"jobId":"deadbeef","source":"report.docx","target":"pdf"}')
+[[ "$http" == "404" ]] \
+  || die "Missing job must return 404 but returned $http"
+
 curl --fail-with-body --silent --show-error \
   --request POST \
   "$ENDPOINT/.management/getSession?api-version=2025-02-02-preview&identifier=$SESSION_ID" \
@@ -294,6 +390,8 @@ image=$IMAGE
 session=$SESSION_ID
 formats=docx,pdf,pptx,xlsx
 hashes=verified
+convert_allowlist=enforced
+edit_allowlist=enforced
 EOF
 
 log "Office validation passed."

@@ -24,9 +24,8 @@
 
 관련 실습:
 
-- [실습 1: Python Code Interpreter](../labs/01_Python_Code_Interpreter_Lab.md)
+- [실습 1: Python Code Interpreter와 LLM](../labs/01_Python_Code_Interpreter_Lab.md)
 - [실습 2: Office Custom Container](../labs/02_Office_Custom_Container_Lab.md)
-- [실습 3: LLM Agent 오케스트레이션](../labs/03_Agent_Orchestration_Lab.md)
 
 ## 1. 목적
 
@@ -38,19 +37,19 @@ AI Workspace의 LLM과 Agent가 사용자의 자연어 요청을 분석하고 �
 
 | AI Workspace 요구사항 | Azure 권장 대응 | 검증 위치 |
 | --- | --- | --- |
-| Python 코드 생성·실행 | Python Code Interpreter session pool | [실습 1 §8](../labs/01_Python_Code_Interpreter_Lab.md) |
-| 오류 수정과 재실행 | 제한된 `stdout`·`stderr`, 코드 hash와 재시도 정책 | [실습 1 §13.2](../labs/01_Python_Code_Interpreter_Lab.md), [실습 3 §5](../labs/03_Agent_Orchestration_Lab.md) |
-| 분석·계산·차트·파일 생성 | Code Interpreter의 `/mnt/data`와 격리된 artifact staging | [실습 1 §9~12](../labs/01_Python_Code_Interpreter_Lab.md) |
-| 첨부파일 분석·가공 | 업로드 전 형식·크기·malware 검사 후 session에 복사 | [실습 1 §10](../labs/01_Python_Code_Interpreter_Lab.md) |
-| Office 문서 생성 | Python pool 또는 Custom Container | [실습 2 §12](../labs/02_Office_Custom_Container_Lab.md) |
-| Office 문서 변환 | 허용 matrix 기반 LibreOffice·Pandoc 변환 | [실습 2 §13.1](../labs/02_Office_Custom_Container_Lab.md) |
-| Office 문서 편집 | 선언적 operation 허용 목록 | [실습 2 §13.2](../labs/02_Office_Custom_Container_Lab.md) |
-| 작업별 독립 환경 | 암호학적으로 생성한 요청 또는 대화 단위 identifier | [실습 1 §13.1](../labs/01_Python_Code_Interpreter_Lab.md) |
-| 실행 시간·CPU·메모리 제한 | 플랫폼 강제 한도와 정책 엔진 사전 분류 | [실습 1 §13.3](../labs/01_Python_Code_Interpreter_Lab.md) |
-| 네트워크 접근 제한 | `EgressDisabled` pool 속성 | [실습 1 §13](../labs/01_Python_Code_Interpreter_Lab.md) |
-| 허용 명령어 제한 | 정책 엔진과 Office 작업 API. 4.4.1절 참고 | [실습 3 §7](../labs/03_Agent_Orchestration_Lab.md) |
-| 임시 파일 자동 정리 | Timed lifecycle, cooldown, 명시적 stop/delete API | [실습 1 §14.1](../labs/01_Python_Code_Interpreter_Lab.md) |
-| 승인 후 실제 반영 | Sandbox와 분리된 Approval Service 및 최소 권한 Connector | [실습 3 §4](../labs/03_Agent_Orchestration_Lab.md) |
+| Python 코드 생성·실행 | Python Code Interpreter session pool | [실습 1B §3](../labs/01B_Python_Code_Interpreter_User_Lab.md#3-실제-llm에-자연어-요청) |
+| 오류 수정과 재실행 | 제한된 `stdout`·`stderr`, 코드 hash와 재시도 정책 | [실습 1A §13.2](../labs/01A_Python_Code_Interpreter_Admin_Lab.md#132-오류-발생-코드-수정-재실행), [실습 1B §5](../labs/01B_Python_Code_Interpreter_User_Lab.md#5-오류-복구와-정책-거부) |
+| 분석·계산·차트·파일 생성 | Code Interpreter의 `/mnt/data`와 격리된 artifact staging | [실습 1A §9~12](../labs/01A_Python_Code_Interpreter_Admin_Lab.md#9-샘플-csv와-분석-코드) |
+| 첨부파일 분석·가공 | 업로드 전 형식·크기·malware 검사 후 session에 복사 | [실습 1B §2~3](../labs/01B_Python_Code_Interpreter_User_Lab.md#2-첨부파일-준비) |
+| Office 문서 생성 | Python pool 또는 Custom Container | [실습 2B §2](../labs/02B_Office_Custom_Container_User_Lab.md#2-생성-요청) |
+| Office 문서 변환 | 허용 matrix 기반 LibreOffice·Pandoc 변환 | [실습 2B §3](../labs/02B_Office_Custom_Container_User_Lab.md#3-변환-요청) |
+| Office 문서 편집 | 선언적 operation 허용 목록 | [실습 2B §4](../labs/02B_Office_Custom_Container_User_Lab.md#4-선언적-편집-요청) |
+| 작업별 독립 환경 | 암호학적으로 생성한 요청 또는 대화 단위 identifier | [실습 1A §13.1](../labs/01A_Python_Code_Interpreter_Admin_Lab.md#131-세션-간-격리-확인) |
+| 실행 시간·CPU·메모리 제한 | 플랫폼 강제 한도와 정책 엔진 사전 분류 | [실습 1A §13.3](../labs/01A_Python_Code_Interpreter_Admin_Lab.md#133-실행-시간과-메모리-한도) |
+| 네트워크 접근 제한 | `EgressDisabled` pool 속성 | [실습 1A §13](../labs/01A_Python_Code_Interpreter_Admin_Lab.md#13-egress-차단-확인) |
+| 허용 명령어 제한 | 정책 엔진과 Office 작업 API. 4.4.1절 참고 | [실습 1B §5](../labs/01B_Python_Code_Interpreter_User_Lab.md#5-오류-복구와-정책-거부), [실습 2B §4](../labs/02B_Office_Custom_Container_User_Lab.md#4-선언적-편집-요청) |
+| 임시 파일 자동 정리 | Timed lifecycle, cooldown, 명시적 stop/delete API | [실습 1A §14.1](../labs/01A_Python_Code_Interpreter_Admin_Lab.md#141-session-종료와-임시-파일-자동-정리) |
+| 승인 후 실제 반영 | Sandbox와 분리된 Approval Service 및 최소 권한 Connector | [실습 1B §4](../labs/01B_Python_Code_Interpreter_User_Lab.md#4-결과-검토와-승인) |
 
 ## 3. 권장 논리 아키텍처
 
@@ -280,7 +279,7 @@ Broker나 LLM client는 두 규약을 모두 처리하도록 만들고, `unsuppo
 
 또한 **실행 성공 판정을 `stderr`가 비었는지로 하면 안 된다.** 정상 동작하는 코드도 경고를 `stderr`로 출력한다. 플랫폼이 돌려주는 `status`만 신뢰하고 `stderr`는 참고 정보로 다룬다. 이를 어기면 성공한 코드를 반복 재시도해 재시도 한도와 비용을 소진한다.
 
-검증 절차는 [실습 3](../labs/03_Agent_Orchestration_Lab.md)에 있다.
+검증 절차는 [실습 1B](../labs/01B_Python_Code_Interpreter_User_Lab.md)에 있다.
 
 ## 5. Trust Boundary와 위협 모델
 
@@ -515,7 +514,7 @@ search *
 | summarize Records=count() by $table
 ```
 
-설정 절차는 [실습 2 §15](../labs/02_Office_Custom_Container_Lab.md)에 있다.
+설정 절차는 [실습 2A §15](../labs/02A_Office_Custom_Container_Admin_Lab.md#15-monitoring)에 있다.
 
 ### 11.4 Metrics와 SLO
 
@@ -632,7 +631,7 @@ Office 변환·편집, CJK 폰트 고정 또는 도구 버전 고정이 필요�
 | 0. 타당성 확인 | 리전, quota, 격리·한도 실측 | 검증 기록 | [실습 1](../labs/01_Python_Code_Interpreter_Lab.md) |
 | 1. 실행 경로 확립 | Python pool에서 분석·차트·파일 생성 | 동작하는 pool과 산출물 | `scripts/python-lab.sh` |
 | 2. 문서 경로 확립 (선택) | Office 생성·변환·편집 | ACR image와 Custom pool | [실습 2](../labs/02_Office_Custom_Container_Lab.md) |
-| 3. 오케스트레이션 | 정책, LLM, 재시도, 승인 게이트 | Agent 계층 | [실습 3](../labs/03_Agent_Orchestration_Lab.md) |
+| 3. 오케스트레이션 | 정책, LLM, 재시도, 승인 게이트 | Agent 계층 | [실습 1B](../labs/01B_Python_Code_Interpreter_User_Lab.md) |
 | 4. 보안 강화 | malware·DLP 검사, 승인 UI, Connector 최소 권한 | 검사 파이프라인 | 고객 구현 영역 |
 | 5. 운영 준비 | 모니터링, 경보, 비용 통제, incident 절차 | SLO와 runbook | 11절, 10.5절 |
 | 6. 확장 | 통제 egress pool, 비동기 compute 경로 | 분리된 pool | 7절, 13절 |

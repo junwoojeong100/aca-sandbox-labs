@@ -89,6 +89,7 @@ class StubClient:
         request_text: str,
         *,
         attachments: tuple[str, ...] = (),
+        expected_outputs: tuple[str, ...] = (),
         failure: str | None = None,
     ) -> Plan:
         self._attempt += 1
@@ -256,15 +257,26 @@ class AzureOpenAIClient:
         request_text: str,
         *,
         attachments: tuple[str, ...] = (),
+        expected_outputs: tuple[str, ...] = (),
         failure: str | None = None,
     ) -> Plan:
         if failure is None:
             attachment_note = (
                 f"\n\n첨부 파일: {', '.join(attachments)}" if attachments else ""
             )
+            output_note = (
+                "\n\n반드시 생성할 결과 파일 이름: "
+                + ", ".join(expected_outputs)
+                + ". /mnt/data 아래에 이 파일명을 정확히 사용한다."
+                if expected_outputs
+                else ""
+            )
             self._history = [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": request_text + attachment_note},
+                {
+                    "role": "user",
+                    "content": request_text + attachment_note + output_note,
+                },
             ]
         else:
             self._history.append(

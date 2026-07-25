@@ -207,6 +207,7 @@ class Orchestrator:
                 plan = self.llm.plan(
                     request_text,
                     attachments=tuple(attachments),
+                    expected_outputs=tuple(expected_outputs),
                     failure=failure,
                 )
                 result.plan = plan.plan
@@ -250,6 +251,32 @@ class Orchestrator:
                     )
                 )
                 if execution.succeeded:
+                    if expected_outputs:
+                        listing = session.list_files()
+                        available = {
+                            str(item.get("name"))
+                            for item in (listing.get("value") or [])
+                            if isinstance(item, dict) and item.get("name")
+                        }
+                        missing = sorted(set(expected_outputs) - available)
+                        audit.append(
+                            StepLog(
+                                "expected-output-check",
+                                {
+                                    "expected": list(expected_outputs),
+                                    "available": sorted(available),
+                                    "missing": missing,
+                                },
+                            )
+                        )
+                        if missing:
+                            failure = (
+                                "코드는 성공했지만 필수 결과 파일이 없다: "
+                                + ", ".join(missing)
+                                + ". 요청된 파일명을 정확히 사용해 전체 코드를 다시 만든다."
+                            )
+                            result.stderr = failure
+                            continue
                     result.succeeded = True
                     break
                 failure = sanitize_error(execution.stderr or execution.stdout)
@@ -276,7 +303,7 @@ class Orchestrator:
                 sorted(available - set(attachments))
             )
             for name in targets:
-                if available and name not in available:
+                if name not in available:
                     audit.append(StepLog("artifact-missing", {"name": name}))
                     continue
                 payload = session.download(name)

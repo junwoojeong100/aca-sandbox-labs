@@ -4,16 +4,15 @@ AI Workspace가 사용자의 자연어 요청과 첨부파일을 받아 코드�
 
 ## 문서 구성
 
-| 문서 | 용도 |
-| --- | --- |
-| [AI Workspace 권장 아키텍처](docs/AI_Workspace_Dynamic_Sessions_Reference_Architecture.md) | Azure 권장 구조, 보안·격리, 세션·리소스·비용 운영, 모니터링, 제약사항, 대안 비교, 도입 단계 |
-| [실습 1: Python Code Interpreter](labs/01_Python_Code_Interpreter_Lab.md) | 코드 실행, CSV 분석, 사전 설치 라이브러리, 세션 격리, 오류 재실행, egress·시간·메모리 한도, 자동 정리 |
-| [실습 2: Office Custom Container](labs/02_Office_Custom_Container_Lab.md) | ACR 이미지, Managed Identity, Log Analytics, Custom pool, DOCX/PDF/PPTX/XLSX 생성·변환·편집 |
-| [실습 3: LLM Agent 오케스트레이션](labs/03_Agent_Orchestration_Lab.md) | 자연어 요청부터 정책 분류, 코드 생성, 재시도, 산출물 검사, 승인 후 반영까지 |
-| [Agent 오케스트레이션 소스](agent/) | 정책 엔진, Session Broker, LLM client, Artifact Staging, Approval Service |
-| [Office 이미지 소스](office-container/) | LibreOffice, Pandoc, Poppler를 포함한 비루트 HTTP 생성·변환·편집 서비스 |
-| [자동 실행 스크립트](scripts/) | 사전 조건 검사, Python·Office·Agent 배포 및 검증, 명시적 전체 정리 |
-| [Offline 테스트](tests/) | Azure 없이 정책·검사·승인 게이트 검증 |
+| 문서 | 주 대상 | 용도 |
+| --- | --- | --- |
+| [AI Workspace 권장 아키텍처](docs/AI_Workspace_Dynamic_Sessions_Reference_Architecture.md) | 관리자·아키텍트 | Azure 권장 구조, 보안·격리, 세션·리소스·비용 운영, 모니터링, 제약사항, 대안 비교, 도입 단계 |
+| [실습 1: Python Code Interpreter와 LLM](labs/01_Python_Code_Interpreter_Lab.md) | 관리자·사용자 | 관리자용 Pool·LLM backend 구성과 사용자용 자연어 코드 생성·실행·승인 |
+| [실습 2: Office Custom Container](labs/02_Office_Custom_Container_Lab.md) | 관리자·사용자 | 관리자용 인프라 구성과 사용자용 DOCX/PDF/PPTX/XLSX 생성·변환·편집 |
+| [Agent 오케스트레이션 소스](agent/) | 관리자·개발자 | 정책 엔진, Session Broker, LLM client, Artifact Staging, Approval Service |
+| [Office 이미지 소스](office-container/) | 관리자·개발자 | LibreOffice, Pandoc, Poppler를 포함한 비루트 HTTP 생성·변환·편집 서비스 |
+| [자동 실행 스크립트](scripts/) | 관리자 | 사전 조건 검사, Python·Office·Agent 배포 및 검증, 명시적 전체 정리 |
+| [Offline 테스트](tests/) | 관리자·개발자 | Azure 없이 정책·검사·승인 게이트 검증 |
 
 ## 가장 빠른 시작
 
@@ -54,22 +53,22 @@ bash scripts/office-lab.sh
 bash scripts/agent-lab.sh
 ```
 
-`check-prereqs.sh`는 로컬 도구, Azure CLI 버전과 로그인만 확인한다. quota와 RBAC 권한은 각 실습 스크립트가 조회하거나 실제 리소스·역할 생성 과정에서 검증한다. 자동 실행이 기본 경로이며, 세부 명령과 문제 해결이 필요할 때 [실습 1](labs/01_Python_Code_Interpreter_Lab.md), [실습 2](labs/02_Office_Custom_Container_Lab.md), [실습 3](labs/03_Agent_Orchestration_Lab.md)을 참고한다.
+`check-prereqs.sh`는 로컬 도구, Azure CLI 버전과 로그인만 확인한다. quota와 RBAC 권한은 각 실습 스크립트가 조회하거나 실제 리소스·역할 생성 과정에서 검증한다. 자동 실행이 기본 경로이며, 세부 명령과 문제 해결이 필요할 때 역할별 [실습 1](labs/01_Python_Code_Interpreter_Lab.md)과 [실습 2](labs/02_Office_Custom_Container_Lab.md)를 참고한다.
 
 ## 지원하는 AI Workspace 시나리오
 
 | 고객 요건 | 검증 위치 |
 | --- | --- |
-| 자연어 요청에 따른 Python 코드 생성·실행과 결과 반환 | 실습 1, 실습 3 |
-| 실행 오류 분석, 제한된 코드 수정과 재실행 | 실습 1 §13.2, 실습 3 §5 |
-| 데이터 분석, 계산, 차트 및 결과 파일 생성 | 실습 1 §9~12 |
-| 첨부파일을 사용한 분석·가공 | 실습 1 §10 |
-| DOCX, XLSX, PPTX, PDF 생성 | 실습 1 §8.1, 실습 2 §12 |
-| Office 문서 변환과 편집 | 실습 2 §13.1, §13.2 |
-| 사용자 또는 요청 단위의 독립 세션과 임시 파일 공간 | 실습 1 §13.1 |
-| 실행 시간, 메모리, 네트워크, 허용 명령어 제한 | 실습 1 §13, §13.3, 실습 3 §7 |
-| 작업 완료 또는 session 종료 시 환경과 파일 자동 정리 | 실습 1 §14.1 |
-| 검사, 미리보기, Diff와 사용자 승인 후 실제 업무 시스템 반영 | 실습 3 §3, §4 |
+| 자연어 요청에 따른 Python 코드 생성·실행과 결과 반환 | 실습 1B §3 |
+| 실행 오류 분석, 제한된 코드 수정과 재실행 | 실습 1A §13.2, 실습 1B §5 |
+| 데이터 분석, 계산, 차트 및 결과 파일 생성 | 실습 1A §9~12, 실습 1B §3 |
+| 첨부파일을 사용한 분석·가공 | 실습 1A §10, 실습 1B §2~3 |
+| DOCX, XLSX, PPTX, PDF 생성 | 실습 1A §8.1, 실습 2B §2 |
+| Office 문서 변환과 편집 | 실습 2B §3~4 |
+| 사용자 또는 요청 단위의 독립 세션과 임시 파일 공간 | 실습 1A §13.1 |
+| 실행 시간, 메모리, 네트워크, 허용 명령어 제한 | 실습 1A §13, §13.3, 실습 1B §5 |
+| 작업 완료 또는 session 종료 시 환경과 파일 자동 정리 | 실습 1A §14.1 |
+| 검사, 미리보기, Diff와 사용자 승인 후 실제 업무 시스템 반영 | 실습 1B §4, 실습 2B §5 |
 
 ## 권장 기준선
 
@@ -140,7 +139,7 @@ AI Workspace 사용자
 | 승인 없는 승격 | 차단 확인 |
 | 승인 후 승격과 hash 재검증 | 성공 |
 | Session identifier 사용자 응답 비노출 | 확인 |
-| Offline 테스트 | 38개 통과 |
+| Offline 테스트 | 39개 통과 |
 
 ### 실제 모델 연결 (gpt-5.6-terra)
 
@@ -152,8 +151,11 @@ AI Workspace 사용자
 | `reasoning_effort: medium` | 정상 동작 |
 | 자연어 요청 → 코드 생성 → 실행 → 승격 | 1회 시도 성공, **17.8초** |
 | 결과 정확성 | 월별 합계 200/240/240, 총합 680.0 일치 |
+| 필수 산출물 이름 | `monthly_sales.png`, `summary.json` 생성과 승인 승격 확인 |
 
-> 실제 모델 검증에서 **stub으로는 재현되지 않는 버그를 발견해 고쳤다.** matplotlib·pandas 경고가 `stderr`로 출력되면서, `status`가 `Succeeded`인데도 성공한 코드를 실패로 판정해 재시도 한도를 소진했다. 성공 판정은 `stderr`가 아니라 `status`로만 해야 한다. 상세는 [실습 3 §9.5](labs/03_Agent_Orchestration_Lab.md)에 있다.
+> 실제 모델 검증에서 **stub으로는 재현되지 않는 버그를 발견해 고쳤다.** matplotlib·pandas 경고가 `stderr`로 출력되면서, `status`가 `Succeeded`인데도 성공한 코드를 실패로 판정해 재시도 한도를 소진했다. 성공 판정은 `stderr`가 아니라 `status`로만 해야 한다. 관리자 확인 사항은 [실습 1A §18.4](labs/01A_Python_Code_Interpreter_Admin_Lab.md#184-관리자-확인-사항)에 있다.
+
+> 역할별 가이드 재검증에서는 LLM이 `summary.json` 대신 `monthly_sales_summary.json`을 만들어도 실행 `status`만 보고 성공으로 반환하는 결함을 발견했다. 필수 산출물 이름을 prompt에 명시하고, 실행 후 누락된 파일이 있으면 제한 횟수 안에서 다시 생성하도록 수정했다.
 
 > Custom Container pool은 최소 1개의 ready session이 필요하므로 유지 비용이 발생한다. Environment, ACR, Log Analytics는 pool을 지워도 남는다. 비용 구조는 [아키텍처 10.5절](docs/AI_Workspace_Dynamic_Sessions_Reference_Architecture.md#105-비용-모델)을 확인한다.
 

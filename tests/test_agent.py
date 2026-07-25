@@ -196,9 +196,14 @@ class ExecutionResultTests(unittest.TestCase):
 class FakeSession:
     """Dynamic Sessions API를 흉내내는 test double."""
 
-    def __init__(self, failures: int = 0) -> None:
+    def __init__(
+        self,
+        failures: int = 0,
+        output_files: tuple[str, ...] = ("summary.json",),
+    ) -> None:
         self.identifier = "py-fake"
         self.failures = failures
+        self.output_files = output_files
         self.executions = 0
         self.uploaded: dict[str, bytes] = {}
         self.deleted = False
@@ -216,7 +221,12 @@ class FakeSession:
         return broker.ExecutionResult("Succeeded", "done\n", "")
 
     def list_files(self) -> dict[str, object]:
-        return {"value": [{"name": "summary.json"}, {"name": "sales.csv"}]}
+        return {
+            "value": [
+                *[{"name": name} for name in self.output_files],
+                {"name": "sales.csv"},
+            ]
+        }
 
     def download(self, name: str) -> bytes:
         return b'{"monthly_sales": {"2026-01": 200.0}}'
@@ -229,7 +239,14 @@ class FakeSession:
 class ShellHappyLLM:
     """항상 정책 위반 코드를 만드는 client."""
 
-    def plan(self, request_text, *, attachments=(), failure=None) -> llm.Plan:
+    def plan(
+        self,
+        request_text,
+        *,
+        attachments=(),
+        expected_outputs=(),
+        failure=None,
+    ) -> llm.Plan:
         return llm.Plan("shell 실행", "import subprocess\nsubprocess.run(['ls'])", "test")
 
 
@@ -282,6 +299,14 @@ class OrchestratorTests(unittest.TestCase):
         result = self._run(session, expected_outputs=("summary.json",))
         self.assertFalse(result.succeeded)
         self.assertEqual(result.attempts, self.settings.max_code_retries + 1)
+        self.assertTrue(session.deleted)
+
+    def test_missing_expected_output_is_retried_then_fails(self) -> None:
+        session = FakeSession(output_files=("monthly_sales_summary.json",))
+        result = self._run(session, expected_outputs=("summary.json",))
+        self.assertFalse(result.succeeded)
+        self.assertEqual(result.attempts, self.settings.max_code_retries + 1)
+        self.assertIn("필수 결과 파일", result.stderr)
         self.assertTrue(session.deleted)
 
     def test_policy_violating_code_is_never_executed(self) -> None:

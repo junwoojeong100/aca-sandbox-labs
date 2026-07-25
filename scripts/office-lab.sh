@@ -250,6 +250,12 @@ unzip -t "$WORK_DIR/report.xlsx" >/dev/null
 head -c 4 "$WORK_DIR/report.pdf" | grep -q '%PDF'
 
 JOB_ID=$(jq -r '.jobId' "$WORK_DIR/generate.json")
+ORIGINAL_PDF_PATH=$(jq -r \
+  '.files[] | select(.name == "report.pdf") | .downloadPath' \
+  "$WORK_DIR/generate.json")
+ORIGINAL_PDF_HASH=$(jq -r \
+  '.files[] | select(.name == "report.pdf") | .sha256' \
+  "$WORK_DIR/generate.json")
 
 # 허용 목록 밖 변환은 거부돼야 한다.
 http=$(curl --silent --show-error --output "$WORK_DIR/convert-denied.json" \
@@ -281,6 +287,21 @@ expect_2xx "$http" "Converted file download" "$WORK_DIR/report.pptx.pdf"
 [[ "$(sha256_file "$WORK_DIR/report.pptx.pdf")" == "$converted_hash" ]] \
   || die "Hash mismatch: report.pptx.pdf"
 head -c 4 "$WORK_DIR/report.pptx.pdf" | grep -q '%PDF'
+
+for attempt in $(seq 1 3); do
+  TOKEN=$(az account get-access-token \
+    --resource https://dynamicsessions.io \
+    --query accessToken --output tsv)
+  http=$(curl --silent --show-error --output "$WORK_DIR/report.after-convert.pdf" \
+    --write-out '%{http_code}' \
+    "$ENDPOINT$ORIGINAL_PDF_PATH?identifier=$SESSION_ID" \
+    --header "Authorization: Bearer $TOKEN")
+  [[ "$http" != "403" ]] && break
+  sleep 15
+done
+expect_2xx "$http" "Original report.pdf download" "$WORK_DIR/report.after-convert.pdf"
+[[ "$(sha256_file "$WORK_DIR/report.after-convert.pdf")" == "$ORIGINAL_PDF_HASH" ]] \
+  || die "Original report.pdf changed during PPTX conversion"
 
 # 허용 목록 밖 편집 operation과 수식 주입은 거부돼야 한다.
 http=$(curl --silent --show-error --output "$WORK_DIR/edit-denied.json" \

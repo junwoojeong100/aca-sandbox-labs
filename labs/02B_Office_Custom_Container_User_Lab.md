@@ -25,11 +25,35 @@
 - 사용자 대신 token과 session identifier를 관리하는 backend
 - `/health`가 노출하는 허용 operation 계약
 
-이 repository의 직접 API 호출은 AI Workspace backend를 대리한다. 실제 사용자에게 Azure token, pool endpoint와 session identifier를 제공하면 안 된다.
+이 repository의 `office_gateway/`가 AI Workspace backend를 대리한다. Gateway만 Azure token, pool endpoint와 session identifier를 관리하며 사용자 API에는 public document job ID만 반환한다.
 
 사용자는 Office container 화면이나 shell을 보지 않는다. 사용자 화면에는 문서 요청, 생성·변환·편집 진행 상태, 미리보기·Diff, 검사 결과, 다운로드와 승인 기능만 제공한다.
 
-## 2. 생성 요청
+## 2. 사용자 Gateway 실행
+
+다음 명령은 관리자 또는 실습 운영자가 repository root에서 실행한다.
+
+```bash
+export RESOURCE_GROUP="rg-ai-workspace-sandbox-lab"
+export OFFICE_POOL_NAME="ai-workspace-office-sbx"
+python3 -m office_gateway.server
+```
+
+Gateway는 기본적으로 `http://127.0.0.1:8090`에서 실행된다. Azure token과 session identifier는 이 프로세스 안에서만 사용한다.
+
+다른 terminal에서 사용자 API 변수를 설정하고 health를 확인한다.
+
+```bash
+export OFFICE_USER_API="http://127.0.0.1:8090"
+export DEMO_USER="user-demo"
+
+curl --fail-with-body --silent --show-error \
+  "$OFFICE_USER_API/health" | jq
+```
+
+> `X-Demo-User`는 localhost 실습에서 ownership 분리를 보여주기 위한 값일 뿐 인증 수단이 아니다. Production에서는 Entra access token을 검증하고 token의 tenant·object ID로 authorization한다.
+
+## 3. 생성 요청
 
 사용자가 요청할 수 있는 예:
 
@@ -40,20 +64,49 @@
 
 backend는 이를 임의 shell이 아니라 다음과 같은 선언적 요청으로 변환한다.
 
-```json
-{
-  "title": "2026년 분기 보고서",
-  "content": "매출 요약\n\n검토 전 문서"
-}
+```bash
+curl --fail-with-body --silent --show-error \
+  --request POST \
+  "$OFFICE_USER_API/api/document-jobs" \
+  --header "X-Demo-User: $DEMO_USER" \
+  --header "Content-Type: application/json" \
+  --data '{
+    "title": "2026년 분기 보고서",
+    "content": "매출 요약\n\n검토 전 문서"
+  }' \
+  --output .work/office-user-create.json
+
+cat .work/office-user-create.json | jq
+export DOCUMENT_JOB_ID=$(jq -r '.id' .work/office-user-create.json)
 ```
 
 통과 기준:
 
 - 네 형식이 생성됨
-- 파일마다 이름, 크기, SHA-256과 다운로드 경로가 반환됨
+- 파일마다 이름, 크기와 SHA-256이 반환됨
+- public job ID와 파일 이름으로 사용자 다운로드 URL을 구성할 수 있음
 - 미리보기 전에는 실제 업무 저장소로 복사되지 않음
 
-## 3. 변환 요청
+상태를 다시 조회한다.
+
+```bash
+curl --fail-with-body --silent --show-error \
+  "$OFFICE_USER_API/api/document-jobs/$DOCUMENT_JOB_ID" \
+  --header "X-Demo-User: $DEMO_USER" | jq
+```
+
+결과 파일을 다운로드한다.
+
+```bash
+curl --fail-with-body --silent --show-error \
+  "$OFFICE_USER_API/api/document-jobs/$DOCUMENT_JOB_ID/files/report.pdf" \
+  --header "X-Demo-User: $DEMO_USER" \
+  --output .work/office-user-report.pdf
+
+file .work/office-user-report.pdf
+```
+
+## 4. 변환 요청
 
 허용된 예:
 
@@ -69,7 +122,16 @@ backend는 이를 임의 shell이 아니라 다음과 같은 선언적 요청으
 
 첫 요청은 성공해야 하고 두 번째 요청은 HTTP 400과 허용 가능한 변환 목록을 반환해야 한다.
 
-## 4. 선언적 편집 요청
+```bash
+curl --fail-with-body --silent --show-error \
+  --request POST \
+  "$OFFICE_USER_API/api/document-jobs/$DOCUMENT_JOB_ID/convert" \
+  --header "X-Demo-User: $DEMO_USER" \
+  --header "Content-Type: application/json" \
+  --data '{"source":"report.pptx","target":"pdf"}' | jq
+```
+
+## 5. 선언적 편집 요청
 
 허용된 예:
 
@@ -85,7 +147,22 @@ backend는 이를 임의 shell이 아니라 다음과 같은 선언적 요청으
 
 사용자에게는 "지원하지 않는 작업"과 허용 가능한 대안을 보여주고 내부 command나 stack trace는 노출하지 않는다.
 
-## 5. 결과 검토와 승인
+```bash
+curl --fail-with-body --silent --show-error \
+  --request POST \
+  "$OFFICE_USER_API/api/document-jobs/$DOCUMENT_JOB_ID/edit" \
+  --header "X-Demo-User: $DEMO_USER" \
+  --header "Content-Type: application/json" \
+  --data '{
+    "operations": [
+      {"op":"setCell","cell":"B2","value":"approved-draft"},
+      {"op":"renameSheet","name":"Final"},
+      {"op":"replaceText","find":"검토 전 문서","replace":"검토 완료"}
+    ]
+  }' | jq
+```
+
+## 6. 결과 검토와 승인
 
 사용자는 다음을 확인한다.
 
@@ -97,7 +174,18 @@ backend는 이를 임의 shell이 아니라 다음과 같은 선언적 요청으
 
 승인 전에는 artifact가 staging에만 있어야 한다. 승인 후에는 Sandbox와 분리된 Approval Service가 hash를 다시 확인하고 최소 권한 Connector로 복사한다.
 
-## 6. 사용자 오류 경험
+실습 gateway는 파일을 다시 다운로드해 형식·macro·hash를 검사한 뒤 `.work/office-user/approved/`에 승격한다.
+
+```bash
+curl --fail-with-body --silent --show-error \
+  --request POST \
+  "$OFFICE_USER_API/api/document-jobs/$DOCUMENT_JOB_ID/approve" \
+  --header "X-Demo-User: $DEMO_USER" \
+  --header "Content-Type: application/json" \
+  --data '{}' | jq
+```
+
+## 7. 사용자 오류 경험
 
 | 상황 | 사용자 응답 |
 | --- | --- |
@@ -107,6 +195,15 @@ backend는 이를 임의 shell이 아니라 다음과 같은 선언적 요청으
 | session 한도 초과 | 잠시 후 재시도하도록 안내 |
 | 문서 생성 실패 | 내부 경로를 제거한 오류 요약과 재시도 여부 |
 
-## 7. 정리
+## 8. 정리
 
-사용자는 결과 보존 또는 삭제만 요청한다. session 중지, pool 삭제, ACR·Environment·Log Analytics 정리는 관리자가 [실습 2A §17](02A_Office_Custom_Container_Admin_Lab.md#17-정리)에서 수행한다.
+사용자 job을 삭제하면 gateway가 대응하는 Custom Container session을 중지하고 메모리의 job mapping을 제거한다.
+
+```bash
+curl --fail-with-body --silent --show-error \
+  --request DELETE \
+  "$OFFICE_USER_API/api/document-jobs/$DOCUMENT_JOB_ID" \
+  --header "X-Demo-User: $DEMO_USER"
+```
+
+사용자는 결과 보존 또는 삭제만 요청한다. Pool, ACR·Environment·Log Analytics 정리는 관리자가 [실습 2A §17](02A_Office_Custom_Container_Admin_Lab.md#17-정리)에서 수행한다.

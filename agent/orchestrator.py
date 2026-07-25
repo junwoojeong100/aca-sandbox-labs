@@ -10,6 +10,7 @@ session identifier는 감사 로그에만 남기고 사용자 응답에는 넣�
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -36,6 +37,10 @@ print(json.dumps({
     "files": entries,
 }, ensure_ascii=False))
 """
+
+USER_INTERNAL_PATH = re.compile(
+    r"(?<!\w)/(?:mnt/data|Users|home|tmp|var)(?:/[^\s'\";,)\]]+)*"
+)
 
 
 @dataclass
@@ -67,15 +72,17 @@ class RunResult:
     def user_view(self) -> dict[str, Any]:
         """사용자에게 반환하는 응답. identifier와 내부 경로를 넣지 않는다."""
         return {
-            "requestId": self.request_id,
             "classification": self.decision.get("classification"),
             "route": self.decision.get("route"),
             "allowed": self.decision.get("allowed"),
             "reason": self.decision.get("reason"),
             "succeeded": self.succeeded,
             "attempts": self.attempts,
-            "plan": self.plan,
-            "stdout": self.stdout[-4000:],
+            "plan": sanitize_user_text(self.plan, self.session_identifier),
+            "stdout": sanitize_user_text(
+                self.stdout[-4000:],
+                self.session_identifier,
+            ),
             "artifacts": [
                 {
                     "name": artifact["name"],
@@ -84,7 +91,21 @@ class RunResult:
                 }
                 for artifact in self.artifacts
             ],
-            "promotions": self.promotions,
+            "promotions": [
+                {
+                    key: promotion[key]
+                    for key in (
+                        "name",
+                        "promoted",
+                        "reason",
+                        "approver",
+                        "sha256",
+                        "promotedAt",
+                    )
+                    if key in promotion
+                }
+                for promotion in self.promotions
+            ],
         }
 
     def audit_view(self) -> dict[str, Any]:
@@ -106,6 +127,12 @@ def sanitize_error(stderr: str, limit: int = 2000) -> str:
     lines = [line for line in stderr.splitlines() if line.strip()]
     trimmed = "\n".join(lines[-40:])
     return trimmed[-limit:]
+
+
+def sanitize_user_text(text: str, session_identifier: str = "") -> str:
+    """Remove backend-only session identifiers and common internal paths."""
+    sanitized = text.replace(session_identifier, "[session]") if session_identifier else text
+    return USER_INTERNAL_PATH.sub("[internal-path]", sanitized)
 
 
 class Orchestrator:
@@ -314,12 +341,21 @@ class Orchestrator:
             manifest_path = store.write_manifest()
             audit.append(StepLog("manifest", {"path": str(manifest_path)}))
 
-            approval = staging.ApprovalService(self.settings.approved_dir)
-            for artifact in store.artifacts:
-                promotion = approval.promote(
-                    artifact, approved=approve, approver=approver
+            if approve and store.artifacts:
+                result.promotions = staging.promote_batch(
+                    store.artifacts,
+                    self.settings.approved_dir / request_id,
+                    approver=approver,
                 )
-                result.promotions.append(promotion)
+            else:
+                result.promotions = [
+                    {
+                        "name": artifact.name,
+                        "promoted": False,
+                        "reason": "승인되지 않음",
+                    }
+                    for artifact in store.artifacts
+                ]
             audit.append(
                 StepLog(
                     "approval",

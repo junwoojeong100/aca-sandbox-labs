@@ -10,7 +10,9 @@ AI Workspace가 사용자의 자연어 요청과 첨부파일을 받아 코드�
 | [실습 1: Python Code Interpreter와 LLM](labs/01_Python_Code_Interpreter_Lab.md) | 관리자·사용자 | 관리자용 Pool·LLM backend 구성과 사용자용 자연어 코드 생성·실행·승인 |
 | [실습 2: Office Custom Container](labs/02_Office_Custom_Container_Lab.md) | 관리자·사용자 | 관리자용 인프라 구성과 사용자용 DOCX/PDF/PPTX/XLSX 생성·변환·편집 |
 | [Agent 오케스트레이션 소스](agent/) | 관리자·개발자 | 정책 엔진, Session Broker, LLM client, Artifact Staging, Approval Service |
+| [Python 사용자 Gateway](python_gateway/) | 관리자·개발자 | 자연어·첨부파일 analysis job, 결과 다운로드와 동일 artifact 승인 API 제공 |
 | [Office 이미지 소스](office-container/) | 관리자·개발자 | LibreOffice, Pandoc, Poppler를 포함한 비루트 HTTP 생성·변환·편집 서비스 |
+| [Office 사용자 Gateway](office_gateway/) | 관리자·개발자 | Azure token·identifier를 숨기고 사용자용 document job·파일·승인 API 제공 |
 | [자동 실행 스크립트](scripts/) | 관리자 | 사전 조건 검사, Python·Office·Agent 배포 및 검증, 명시적 전체 정리 |
 | [Offline 테스트](tests/) | 관리자·개발자 | Azure 없이 정책·검사·승인 게이트 검증 |
 
@@ -124,6 +126,7 @@ AI Workspace 사용자
 | 실행 시간 한도 | 300초 작업이 221.5초에 `Failed` |
 | 메모리 한도 | 무한 할당이 `Execution aborted`로 종료 |
 | Session 삭제와 파일 정리 | HTTP 204, 이후 목록 비어 있고 다운로드 404 |
+| Python 사용자 Gateway | multipart 자연어·CSV → 실제 LLM 실행 → 다운로드 → 동일 hash 승인 → 삭제 성공 |
 
 ### Office 문서 경로
 
@@ -133,11 +136,15 @@ AI Workspace 사용자
 | LibreOffice, Pandoc, Poppler | 컨테이너 내부 버전 확인 |
 | DOCX·PDF·PPTX·XLSX 생성과 다운로드 | 성공, 파일 형식과 SHA-256 확인 |
 | 허용 목록 기반 변환 | PPTX→PDF 성공, 비허용 조합 HTTP 400 |
+| 변환 시 원본 보존 | PPTX→PDF 후 기존 `report.pdf` hash 불변 |
 | 선언적 편집 | 3개 operation 적용 성공, `runShell`과 수식 주입 HTTP 400 |
+| 문서 입력 안전성 | Markdown형 로컬 경로·URL을 literal text로 처리, 외부·로컬 media 미삽입 |
+| XLSX 입력 안전성 | formula형 생성 입력은 text로 저장, 실패한 편집 batch는 전체 rollback |
 | Custom Container Startup/Liveness probe | pool 구성 반영 확인 |
 | Log Analytics와 pool metrics | console log와 ready/executing/pending metric 확인 |
 | Session identifier log 비노출 | Log Analytics 검색 결과 0건 |
 | Local container smoke | 생성·변환·편집, hash, 오류 응답과 log sanitization 통과 |
+| Office 사용자 Gateway | create·status·download·convert·edit·approve·delete `curl` 흐름 성공 |
 
 ### Agent 오케스트레이션
 
@@ -150,7 +157,7 @@ AI Workspace 사용자
 | 승인 없는 승격 | 차단 확인 |
 | 승인 후 승격과 hash 재검증 | 성공 |
 | Session identifier 사용자 응답 비노출 | 확인 |
-| Offline 테스트 | 39개 통과 |
+| Offline 테스트 | 70개 통과 |
 
 ### 실제 모델 연결 (gpt-5.6-terra)
 

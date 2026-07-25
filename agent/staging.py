@@ -12,6 +12,7 @@ import json
 import re
 import shutil
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -39,6 +40,7 @@ ALLOWED_EXTENSIONS = {
 
 ZIP_BASED_EXTENSIONS = {".docx", ".pptx", ".xlsx"}
 SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
+RESERVED_ARTIFACT_NAMES = {"manifest.json"}
 
 
 class StagingError(RuntimeError):
@@ -90,6 +92,8 @@ class ArtifactStaging:
 
         if not SAFE_NAME.match(name):
             raise StagingError(f"안전하지 않은 파일 이름: {name}")
+        if name in RESERVED_ARTIFACT_NAMES:
+            raise StagingError(f"예약된 artifact 파일 이름: {name}")
         if extension not in ALLOWED_EXTENSIONS:
             raise StagingError(f"허용되지 않은 확장자: {extension or '(없음)'}")
         if len(payload) == 0:
@@ -200,3 +204,72 @@ class ApprovalService:
             "target": str(target),
             "promotedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
+
+
+def promote_batch(
+    artifacts: list[Artifact],
+    destination: Path,
+    *,
+    approver: str,
+) -> list[dict[str, object]]:
+    """Verify all artifacts, then publish the complete set with one directory rename."""
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    snapshots: list[tuple[Artifact, bytes]] = []
+    for artifact in artifacts:
+        payload = artifact.path.read_bytes()
+        current_hash = sha256_bytes(payload)
+        if current_hash != artifact.sha256:
+            raise StagingError(
+                f"{artifact.name}의 hash가 staging 이후 변경됐다. 승격을 중단한다."
+            )
+        snapshots.append((artifact, payload))
+
+    promoted_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    if destination.exists():
+        if not destination.is_dir():
+            raise StagingError("승인 대상 경로가 디렉터리가 아니다")
+        expected_names = {artifact.name for artifact, _ in snapshots}
+        actual_names = {path.name for path in destination.iterdir() if path.is_file()}
+        if expected_names != actual_names:
+            raise StagingError("기존 승인 디렉터리의 파일 집합이 요청과 다르다")
+        for artifact, _ in snapshots:
+            target = destination / artifact.name
+            if sha256_bytes(target.read_bytes()) != artifact.sha256:
+                raise StagingError(f"기존 승인 파일의 hash가 다르다: {artifact.name}")
+        return [
+            {
+                "name": artifact.name,
+                "promoted": True,
+                "approver": approver,
+                "sha256": artifact.sha256,
+                "target": str(destination / artifact.name),
+                "promotedAt": promoted_at,
+            }
+            for artifact, _ in snapshots
+        ]
+
+    temporary = destination.parent / f".{destination.name}.tmp-{uuid.uuid4().hex}"
+    temporary.mkdir()
+    try:
+        for artifact, payload in snapshots:
+            target = temporary / artifact.name
+            target.write_bytes(payload)
+            target.chmod(0o440)
+        temporary.replace(destination)
+    except OSError as error:
+        if temporary.exists():
+            shutil.rmtree(temporary)
+        raise StagingError(f"artifact batch 승격 실패: {error}") from error
+
+    return [
+        {
+            "name": artifact.name,
+            "promoted": True,
+            "approver": approver,
+            "sha256": artifact.sha256,
+            "target": str(destination / artifact.name),
+            "promotedAt": promoted_at,
+        }
+        for artifact, _ in snapshots
+    ]

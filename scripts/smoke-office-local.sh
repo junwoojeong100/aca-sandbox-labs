@@ -55,6 +55,14 @@ http=$(curl --silent --output "$WORK_DIR/invalid-json-shape.json" \
   --data '[]')
 [[ "$http" == "400" ]] || die "Expected HTTP 400, received $http"
 
+http=$(curl --silent --output "$WORK_DIR/invalid-control.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  "$BASE_URL/generate" \
+  --header 'Content-Type: application/json' \
+  --data '{"title":"invalid\u0000title","content":"body"}')
+[[ "$http" == "400" ]] || die "Expected HTTP 400 for control character, received $http"
+
 curl --fail --silent --show-error \
   --request POST \
   "$BASE_URL/generate" \
@@ -84,6 +92,77 @@ unzip -t "$WORK_DIR/report.xlsx" >/dev/null
 head -c 4 "$WORK_DIR/report.pdf" | grep -q '%PDF'
 
 JOB_ID=$(jq -r '.jobId' "$WORK_DIR/generate.json")
+ORIGINAL_PDF_PATH=$(jq -r \
+  '.files[] | select(.name == "report.pdf") | .downloadPath' \
+  "$WORK_DIR/generate.json")
+ORIGINAL_PDF_HASH=$(jq -r \
+  '.files[] | select(.name == "report.pdf") | .sha256' \
+  "$WORK_DIR/generate.json")
+
+# Formula-like generation input must remain text in XLSX.
+curl --fail --silent --show-error \
+  --request POST \
+  "$BASE_URL/generate" \
+  --header 'Content-Type: application/json' \
+  --data '{"title":"=1+1","content":"@SUM(1,1)"}' \
+  --output "$WORK_DIR/formula-safe-generate.json"
+FORMULA_XLSX_PATH=$(jq -r \
+  '.files[] | select(.name == "report.xlsx") | .downloadPath' \
+  "$WORK_DIR/formula-safe-generate.json")
+curl --fail --silent --show-error "$BASE_URL$FORMULA_XLSX_PATH" \
+  --output "$WORK_DIR/formula-safe.xlsx"
+if unzip -p "$WORK_DIR/formula-safe.xlsx" xl/worksheets/sheet1.xml | grep -q '<f'; then
+  die "Formula-like generation input created an XLSX formula"
+fi
+
+# Lines longer than Excel's cell limit must be split without data loss.
+python3 - "$WORK_DIR/long-line-request.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "w", encoding="utf-8") as output:
+    json.dump({"title": "Long line", "content": "x" * 40000}, output)
+PY
+curl --fail --silent --show-error \
+  --request POST \
+  "$BASE_URL/generate" \
+  --header 'Content-Type: application/json' \
+  --data-binary "@$WORK_DIR/long-line-request.json" \
+  --output "$WORK_DIR/long-line-generate.json"
+LONG_XLSX_PATH=$(jq -r \
+  '.files[] | select(.name == "report.xlsx") | .downloadPath' \
+  "$WORK_DIR/long-line-generate.json")
+curl --fail --silent --show-error "$BASE_URL$LONG_XLSX_PATH" \
+  --output "$WORK_DIR/long-line.xlsx"
+python3 - "$WORK_DIR/long-line.xlsx" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+import zipfile
+
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    root = ET.fromstring(archive.read("xl/worksheets/sheet1.xml"))
+texts = [node.text or "" for node in root.iter() if node.tag.endswith("}t")]
+chunks = [text for text in texts if text and set(text) == {"x"}]
+assert sum(map(len, chunks)) == 40000
+assert max(map(len, chunks)) <= 32767
+PY
+
+# Markdown-like file and URL syntax must remain literal text without embedded media.
+curl --fail --silent --show-error \
+  --request POST \
+  "$BASE_URL/generate" \
+  --header 'Content-Type: application/json' \
+  --data '{"title":"Literal text","content":"![local](/etc/hostname)\n![remote](https://example.com/image.png)"}' \
+  --output "$WORK_DIR/literal-generate.json"
+LITERAL_DOCX_PATH=$(jq -r \
+  '.files[] | select(.name == "report.docx") | .downloadPath' \
+  "$WORK_DIR/literal-generate.json")
+curl --fail --silent --show-error "$BASE_URL$LITERAL_DOCX_PATH" \
+  --output "$WORK_DIR/literal.docx"
+if unzip -l "$WORK_DIR/literal.docx" | grep -q 'word/media/'; then
+  die "Markdown-like input embedded external or local media"
+fi
+unzip -p "$WORK_DIR/literal.docx" word/document.xml | grep -q '/etc/hostname'
 
 # 허용 목록에 없는 변환은 거부한다.
 http=$(curl --silent --output "$WORK_DIR/convert-denied.json" \
@@ -109,6 +188,12 @@ curl --fail --silent --show-error "$BASE_URL$converted_path" \
   || die "Hash mismatch: report.pptx.pdf"
 head -c 4 "$WORK_DIR/report.pptx.pdf" | grep -q '%PDF'
 
+# 변환이 같은 stem의 기존 report.pdf를 덮어쓰거나 이동하면 안 된다.
+curl --fail --silent --show-error "$BASE_URL$ORIGINAL_PDF_PATH" \
+  --output "$WORK_DIR/report.after-convert.pdf"
+[[ "$(sha256_file "$WORK_DIR/report.after-convert.pdf")" == "$ORIGINAL_PDF_HASH" ]] \
+  || die "Original report.pdf changed during PPTX conversion"
+
 # 허용 목록에 없는 편집 operation은 거부한다.
 http=$(curl --silent --output "$WORK_DIR/edit-denied.json" \
   --write-out '%{http_code}' \
@@ -126,6 +211,31 @@ http=$(curl --silent --output "$WORK_DIR/edit-formula.json" \
   --header 'Content-Type: application/json' \
   --data "{\"jobId\":\"$JOB_ID\",\"operations\":[{\"op\":\"setCell\",\"cell\":\"B2\",\"value\":\"=1+1\"}]}")
 [[ "$http" == "400" ]] || die "Expected HTTP 400 for formula value, received $http"
+
+http=$(curl --silent --output "$WORK_DIR/edit-control.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  "$BASE_URL/edit" \
+  --header 'Content-Type: application/json' \
+  --data "{\"jobId\":\"$JOB_ID\",\"operations\":[
+    {\"op\":\"setCell\",\"cell\":\"B2\",\"value\":\"bad\\u0000value\"}
+  ]}")
+[[ "$http" == "400" ]] || die "Expected HTTP 400 for control character, received $http"
+
+# If a later edit fails, earlier operations in the batch must roll back.
+http=$(curl --silent --output "$WORK_DIR/edit-rollback.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  "$BASE_URL/edit" \
+  --header 'Content-Type: application/json' \
+  --data "{\"jobId\":\"$JOB_ID\",\"operations\":[
+    {\"op\":\"setCell\",\"cell\":\"B2\",\"value\":\"must-not-persist\"},
+    {\"op\":\"replaceText\",\"find\":\"\",\"replace\":\"invalid\"}
+  ]}")
+[[ "$http" == "400" ]] || die "Expected HTTP 400 for failed edit batch, received $http"
+http=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  "$BASE_URL/files/$JOB_ID/report.edited.xlsx")
+[[ "$http" == "404" ]] || die "Failed edit batch left report.edited.xlsx behind"
 
 # 허용된 선언적 편집.
 curl --fail --silent --show-error \

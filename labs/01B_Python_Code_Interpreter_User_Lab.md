@@ -26,11 +26,38 @@
 - 추론 identity의 `Cognitive Services OpenAI User` 역할
 - 사용자에게 token, pool endpoint, session identifier를 노출하지 않는 backend
 
-이 repository에서는 `agent.cli`가 AI Workspace API/UI를 대신한다. 명령은 실습 운영자가 실행하지만 `--request`, `--attach`, `--approve`만 사용자 행동에 해당한다.
+이 repository에서는 `python_gateway/`가 AI Workspace backend를 대리한다. Gateway만 LLM 설정, pool endpoint, Entra token과 session identifier를 관리하며 사용자 API에는 public analysis job ID만 반환한다.
 
 사용자는 session terminal이나 desktop을 보지 않는다. 사용자 화면에는 자연어 요청, 진행 상태, LLM 작업 계획, 안전한 오류 요약, 결과 파일·미리보기와 승인 상태만 표시한다.
 
-## 2. 첨부파일 준비
+## 2. 사용자 Gateway 실행
+
+다음 명령은 관리자 또는 실습 운영자가 repository root에서 실행한다. 실습 1A에서 설정한 실제 LLM 환경 변수를 사용한다.
+
+```bash
+export RESOURCE_GROUP="rg-ai-workspace-sandbox-lab"
+export PYTHON_POOL_NAME="ai-workspace-python-sbx"
+export LLM_PROVIDER="azure-openai"
+export AZURE_OPENAI_ENDPOINT="https://<ACCOUNT>.openai.azure.com"
+export AZURE_OPENAI_DEPLOYMENT="<DEPLOYMENT_NAME>"
+export REASONING_EFFORT="medium"
+
+python3 -m python_gateway.server
+```
+
+Gateway는 기본적으로 `http://127.0.0.1:8089`에서 실행된다. 다른 terminal에서 사용자 API 변수를 설정한다.
+
+```bash
+export PYTHON_USER_API="http://127.0.0.1:8089"
+export DEMO_USER="user-demo"
+
+curl --fail-with-body --silent --show-error \
+  "$PYTHON_USER_API/health" | jq
+```
+
+> `X-Demo-User`는 localhost 실습에서 ownership 분리를 보여주기 위한 값일 뿐 인증 수단이 아니다. Production에서는 Entra access token을 검증하고 token의 tenant·object ID로 authorization한다.
+
+## 3. 첨부파일 준비
 
 ```bash
 mkdir -p .work/python-user
@@ -46,23 +73,24 @@ month,product,amount
 CSV
 ```
 
-## 3. 실제 LLM에 자연어 요청
+## 4. 실제 LLM에 자연어 요청
 
-관리자가 구성한 backend 환경에서 실행한다.
+자연어, 첨부파일과 필수 결과 파일 이름을 multipart request로 전달한다.
 
 ```bash
-export STAGING_DIR="$PWD/.work/python-user/staging"
-export APPROVED_DIR="$PWD/.work/python-user/approved"
-
-python3 -m agent.cli \
-  --request "첨부한 매출 CSV를 월별 합계로 집계하고 차트 PNG와 요약 JSON을 만들어줘" \
-  --attach .work/python-user/sales.csv \
-  --expect monthly_sales.png \
-  --expect summary.json \
-  --audit-dir .work/python-user/audit \
-  > .work/python-user/result.json
+curl --fail-with-body --silent --show-error \
+  --request POST \
+  "$PYTHON_USER_API/api/analysis-jobs" \
+  --header "X-Demo-User: $DEMO_USER" \
+  --form "request=첨부한 매출 CSV를 월별 합계로 집계하고 차트 PNG와 요약 JSON을 만들어줘" \
+  --form "file=@.work/python-user/sales.csv;filename=sales.csv" \
+  --form "expected=monthly_sales.png" \
+  --form "expected=summary.json" \
+  --output .work/python-user/create.json
 
 jq '{
+  id,
+  status,
   classification,
   route,
   succeeded,
@@ -70,11 +98,14 @@ jq '{
   plan,
   artifacts: [.artifacts[].name],
   promotions
-}' .work/python-user/result.json
+}' .work/python-user/create.json
+
+export ANALYSIS_JOB_ID=$(jq -r '.id' .work/python-user/create.json)
 ```
 
 통과 기준:
 
+- `status`는 `completed`
 - `classification`은 `A`, `route`는 `python-pool`
 - `succeeded`는 `true`
 - `plan`에 실제 LLM이 만든 작업 계획이 있음
@@ -82,29 +113,44 @@ jq '{
 - 승인하지 않았으므로 `promotions[].promoted`는 `false`
 - 사용자 응답에는 token, endpoint, session identifier가 없음
 
-## 4. 결과 검토와 승인
-
-검사 결과와 미리보기를 확인한 뒤 동일 요청을 명시적으로 승인한다.
+상태를 다시 조회한다.
 
 ```bash
-python3 -m agent.cli \
-  --request "첨부한 매출 CSV를 월별 합계로 집계하고 차트 PNG와 요약 JSON을 만들어줘" \
-  --attach .work/python-user/sales.csv \
-  --expect monthly_sales.png \
-  --expect summary.json \
-  --approve \
-  --approver "user-demo" \
-  --audit-dir .work/python-user/audit \
-  > .work/python-user/approved-result.json
-
-jq '.promotions' .work/python-user/approved-result.json
-test -s .work/python-user/approved/monthly_sales.png
-test -s .work/python-user/approved/summary.json
+curl --fail-with-body --silent --show-error \
+  "$PYTHON_USER_API/api/analysis-jobs/$ANALYSIS_JOB_ID" \
+  --header "X-Demo-User: $DEMO_USER" | jq
 ```
 
-승인은 Sandbox 안의 코드를 다시 실행할 권한이 아니라, 검사된 artifact hash를 최종 위치로 승격할 권한이다.
+결과 파일을 다운로드한다.
 
-## 5. 오류 복구와 정책 거부
+```bash
+curl --fail-with-body --silent --show-error \
+  "$PYTHON_USER_API/api/analysis-jobs/$ANALYSIS_JOB_ID/files/summary.json" \
+  --header "X-Demo-User: $DEMO_USER" \
+  --output .work/python-user/summary.json
+
+jq . .work/python-user/summary.json
+```
+
+## 5. 결과 검토와 승인
+
+검사 결과와 미리보기를 확인한 뒤 동일 analysis job을 승인한다.
+
+```bash
+curl --fail-with-body --silent --show-error \
+  --request POST \
+  "$PYTHON_USER_API/api/analysis-jobs/$ANALYSIS_JOB_ID/approve" \
+  --header "X-Demo-User: $DEMO_USER" \
+  --header "Content-Type: application/json" \
+  --data '{}' \
+  --output .work/python-user/approved.json
+
+jq '.status, .promotions' .work/python-user/approved.json
+```
+
+승인은 코드를 다시 실행하지 않는다. 최초 실행에서 staging한 artifact의 hash를 다시 확인하고 같은 파일만 `.work/python-user-api/approved/`로 승격한다.
+
+## 6. 오류 복구와 정책 거부
 
 재시도와 정책 분기는 실제 모델 품질과 무관하게 재현할 수 있도록 deterministic stub으로 검증한다.
 
@@ -120,7 +166,7 @@ LLM_PROVIDER=stub bash scripts/agent-lab.sh
 - 운영 시스템 직접 변경 요청은 session을 만들기 전에 거부됨
 - Office 요청은 실습 2 경로로 분류됨
 
-## 6. 사용자에게 보여야 하는 정보
+## 7. 사용자에게 보여야 하는 정보
 
 | 표시 | 숨김 |
 | --- | --- |
@@ -129,12 +175,15 @@ LLM_PROVIDER=stub bash scripts/agent-lab.sh
 | 정책 거부 이유와 안전한 오류 요약 | 생성 코드의 내부 경로와 credential |
 | 승인·승격 상태 | 다른 tenant의 데이터 |
 
-## 7. 정리
+## 8. 정리
 
-orchestrator는 성공·실패와 관계없이 실행 session을 삭제한다. 사용자 실습의 로컬 파일만 삭제하려면 다음을 실행한다.
+orchestrator는 성공·실패와 관계없이 실행 session을 삭제한다. 사용자 job 삭제는 gateway의 메모리 mapping과 staging 파일을 제거한다.
 
 ```bash
-rm -rf .work/python-user
+curl --fail-with-body --silent --show-error \
+  --request DELETE \
+  "$PYTHON_USER_API/api/analysis-jobs/$ANALYSIS_JOB_ID" \
+  --header "X-Demo-User: $DEMO_USER"
 ```
 
 Azure pool과 모델 배포의 정리는 관리자가 [실습 1A](01A_Python_Code_Interpreter_Admin_Lab.md)에서 수행한다.

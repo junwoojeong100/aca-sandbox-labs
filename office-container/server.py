@@ -4,6 +4,7 @@ import mimetypes
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -17,6 +18,7 @@ import pptx
 import docx
 from docx import Document
 from openpyxl import Workbook, load_workbook
+from openpyxl.utils.exceptions import IllegalCharacterError
 from pptx import Presentation
 
 
@@ -28,8 +30,10 @@ MAX_JOBS = 20
 MAX_STORAGE_BYTES = 256 * 1024 * 1024
 JOB_TTL_SECONDS = 3600
 MAX_EDIT_OPERATIONS = 50
+EXCEL_CELL_MAX_CHARS = 32_767
 PORT = 8080
 JOB_LOCK = threading.Lock()
+JOB_OPERATION_LOCK = threading.RLock()
 
 GENERATED_FILES = frozenset(
     {"report.docx", "report.pdf", "report.pptx", "report.xlsx"}
@@ -48,6 +52,7 @@ ALLOWED_EDIT_OPERATIONS = frozenset({"setCell", "renameSheet", "replaceText"})
 
 CELL_REFERENCE = re.compile(r"^[A-Z]{1,3}[1-9][0-9]{0,6}$")
 SHEET_NAME = re.compile(r"^[A-Za-z0-9 _가-힣-]{1,31}$")
+ILLEGAL_XML_CONTROL = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
 
 
 def tool_version(command: list[str]) -> str:
@@ -118,6 +123,8 @@ def _edit_set_cell(job_dir: Path, operation: dict[str, object]) -> Path:
     if isinstance(value, str):
         if len(value) > 1000:
             raise EditError("value must be at most 1000 characters")
+        if ILLEGAL_XML_CONTROL.search(value):
+            raise EditError("value contains unsupported control characters")
         # 수식 주입을 막는다. 필요한 수식은 별도 허용 목록으로 다룬다.
         if value.startswith(("=", "+", "-", "@")):
             raise EditError("Formula values are not allowed")
@@ -175,6 +182,8 @@ def _edit_replace_text(job_dir: Path, operation: dict[str, object]) -> Path:
         raise EditError("replace must be a string")
     if len(find) > 200 or len(replace) > 1000:
         raise EditError("find or replace text is too long")
+    if ILLEGAL_XML_CONTROL.search(find) or ILLEGAL_XML_CONTROL.search(replace):
+        raise EditError("find or replace contains unsupported control characters")
 
     source = job_dir / "report.edited.docx"
     if not source.is_file():
@@ -209,13 +218,62 @@ EDIT_HANDLERS = {
 def apply_edit_operations(
     job_dir: Path, operations: list[dict[str, object]]
 ) -> list[Path]:
-    """허용된 operation을 순서대로 적용하고 변경된 파일 목록을 돌려준다."""
-    outputs: dict[str, Path] = {}
-    for operation in operations:
-        handler = EDIT_HANDLERS[str(operation["op"])]
-        result = handler(job_dir, operation)
-        outputs[result.name] = result
-    return [outputs[name] for name in sorted(outputs)]
+    """Apply a complete edit batch on temporary copies, then commit it."""
+    with tempfile.TemporaryDirectory(prefix="edit-", dir=job_dir) as temporary:
+        temporary_dir = Path(temporary)
+        for name in (
+            "report.docx",
+            "report.xlsx",
+            "report.edited.docx",
+            "report.edited.xlsx",
+        ):
+            source = job_dir / name
+            if source.is_file():
+                shutil.copyfile(source, temporary_dir / name)
+
+        outputs: dict[str, Path] = {}
+        for operation in operations:
+            handler = EDIT_HANDLERS[str(operation["op"])]
+            result = handler(temporary_dir, operation)
+            outputs[result.name] = result
+
+        backups: dict[str, Path | None] = {}
+        for name in outputs:
+            destination = job_dir / name
+            if destination.is_file():
+                backup = temporary_dir / f"backup-{name}"
+                shutil.copyfile(destination, backup)
+                backups[name] = backup
+            else:
+                backups[name] = None
+
+        committed = []
+        try:
+            for name in sorted(outputs):
+                destination = job_dir / name
+                outputs[name].replace(destination)
+                committed.append(name)
+        except OSError as commit_error:
+            rollback_errors = []
+            for name in reversed(committed):
+                destination = job_dir / name
+                backup = backups[name]
+                try:
+                    if backup is None:
+                        destination.unlink(missing_ok=True)
+                    else:
+                        backup.replace(destination)
+                except OSError as rollback_error:
+                    rollback_errors.append(rollback_error)
+            if rollback_errors:
+                raise OSError("Edit commit and rollback both failed") from commit_error
+            raise
+        return [job_dir / name for name in committed]
+
+
+def spreadsheet_literal(value: str) -> str:
+    """Store formula-like user input as text in generated workbooks."""
+    return f"'{value}" if value.startswith(("=", "+", "-", "@")) else value
 
 
 def remove_job(job_dir: Path) -> None:
@@ -275,26 +333,33 @@ class Handler(BaseHTTPRequestHandler):
 
         parts = [unquote(part) for part in parsed.path.split("/") if part]
         if len(parts) == 3 and parts[0] == "files":
-            job_id, filename = parts[1], parts[2]
-            if not job_id.isalnum() or filename not in ALLOWED_DOWNLOADS:
-                self.send_json(HTTPStatus.BAD_REQUEST, {"error": "Invalid file path"})
-                return
+            with JOB_OPERATION_LOCK:
+                job_id, filename = parts[1], parts[2]
+                if not job_id.isalnum() or filename not in ALLOWED_DOWNLOADS:
+                    self.send_json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": "Invalid file path"},
+                    )
+                    return
 
-            path = BASE_DIR / job_id / filename
-            if not path.is_file():
-                self.send_json(HTTPStatus.NOT_FOUND, {"error": "File not found"})
-                return
+                path = BASE_DIR / job_id / filename
+                if not path.is_file():
+                    self.send_json(HTTPStatus.NOT_FOUND, {"error": "File not found"})
+                    return
 
-            self.send_response(HTTPStatus.OK)
-            self.send_header(
-                "Content-Type",
-                mimetypes.guess_type(filename)[0] or "application/octet-stream",
-            )
-            self.send_header("Content-Length", str(path.stat().st_size))
-            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
-            self.end_headers()
-            with path.open("rb") as source:
-                shutil.copyfileobj(source, self.wfile, length=64 * 1024)
+                self.send_response(HTTPStatus.OK)
+                self.send_header(
+                    "Content-Type",
+                    mimetypes.guess_type(filename)[0] or "application/octet-stream",
+                )
+                self.send_header("Content-Length", str(path.stat().st_size))
+                self.send_header(
+                    "Content-Disposition",
+                    f'attachment; filename="{filename}"',
+                )
+                self.end_headers()
+                with path.open("rb") as source:
+                    shutil.copyfileobj(source, self.wfile, length=64 * 1024)
             return
 
         self.send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
@@ -349,15 +414,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        if path == "/generate":
-            self.handle_generate()
-            return
-        if path == "/convert":
-            self.handle_convert()
-            return
-        if path == "/edit":
-            self.handle_edit()
-            return
+        with JOB_OPERATION_LOCK:
+            if path == "/generate":
+                self.handle_generate()
+                return
+            if path == "/convert":
+                self.handle_convert()
+                return
+            if path == "/edit":
+                self.handle_edit()
+                return
         self.send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
 
     def handle_convert(self) -> None:
@@ -398,49 +464,53 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         job_id = job_dir.name
-        produced = job_dir / f"{source_path.stem}.{target}"
         output_path = job_dir / output_name
-        try:
-            subprocess.run(
-                [
-                    "libreoffice",
-                    f"-env:UserInstallation=file:///tmp/lo-profile-{job_id}",
-                    "--headless",
-                    "--convert-to",
-                    target,
-                    "--outdir",
-                    str(job_dir),
-                    str(source_path),
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-        except subprocess.TimeoutExpired:
-            self.send_json(
-                HTTPStatus.GATEWAY_TIMEOUT,
-                {"error": "Conversion timed out"},
-            )
-            return
-        except subprocess.CalledProcessError as error:
-            self.send_json(
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-                {
-                    "error": "Conversion failed",
-                    "stderr": (error.stderr or "")[-2000:],
-                },
-            )
-            return
+        with tempfile.TemporaryDirectory(
+            prefix=f"convert-{job_id}-",
+            dir=job_dir,
+        ) as temporary:
+            temporary_dir = Path(temporary)
+            produced = temporary_dir / f"{source_path.stem}.{target}"
+            try:
+                subprocess.run(
+                    [
+                        "libreoffice",
+                        f"-env:UserInstallation=file:///tmp/lo-profile-{job_id}",
+                        "--headless",
+                        "--convert-to",
+                        target,
+                        "--outdir",
+                        str(temporary_dir),
+                        str(source_path),
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+            except subprocess.TimeoutExpired:
+                self.send_json(
+                    HTTPStatus.GATEWAY_TIMEOUT,
+                    {"error": "Conversion timed out"},
+                )
+                return
+            except subprocess.CalledProcessError as error:
+                self.send_json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {
+                        "error": "Conversion failed",
+                        "stderr": (error.stderr or "")[-2000:],
+                    },
+                )
+                return
 
-        if not produced.is_file():
-            self.send_json(
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-                {"error": "Converted artifact was not produced"},
-            )
-            return
-        if produced != output_path:
-            produced.replace(output_path)
+            if not produced.is_file():
+                self.send_json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"error": "Converted artifact was not produced"},
+                )
+                return
+            shutil.copyfile(produced, output_path)
 
         self.send_json(
             HTTPStatus.OK,
@@ -494,13 +564,13 @@ class Handler(BaseHTTPRequestHandler):
         job_id = job_dir.name
         try:
             outputs = apply_edit_operations(job_dir, operations)
-        except EditError as error:
+        except (EditError, IllegalCharacterError, ValueError) as error:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
             return
         except OSError as error:
             self.send_json(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
-                {"error": f"Edit failed: {error}"},
+                {"error": "Edit failed due to a filesystem error"},
             )
             return
 
@@ -538,6 +608,12 @@ class Handler(BaseHTTPRequestHandler):
                 {"error": f"content must be at most {MAX_CONTENT_CHARS} characters"},
             )
             return
+        if ILLEGAL_XML_CONTROL.search(title) or ILLEGAL_XML_CONTROL.search(content):
+            self.send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "title or content contains unsupported control characters"},
+            )
+            return
 
         job_id = uuid.uuid4().hex
         job_dir = BASE_DIR / job_id
@@ -563,28 +639,40 @@ class Handler(BaseHTTPRequestHandler):
         except OSError as error:
             self.send_json(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
-                {"error": f"Unable to allocate job workspace: {error}"},
+                {"error": "Unable to allocate job workspace"},
             )
             return
 
-        markdown_path = job_dir / "report.md"
         docx_path = job_dir / "report.docx"
         pdf_path = job_dir / "report.pdf"
         pptx_path = job_dir / "report.pptx"
         xlsx_path = job_dir / "report.xlsx"
 
         try:
-            markdown_path.write_text(
-                f"% {title.strip()}\n\n# {title.strip()}\n\n{content.strip()}\n",
-                encoding="utf-8",
-            )
+            document = Document()
+            document.add_heading(title.strip(), level=0)
+            for line in content.strip().splitlines():
+                document.add_paragraph(line)
+            document.save(docx_path)
+
             workbook = Workbook()
             worksheet = workbook.active
             worksheet.title = "Report"
-            worksheet["A1"] = title.strip()
+            worksheet["A1"] = spreadsheet_literal(title.strip())
             worksheet["A2"] = "Generated by AI Workspace Office Sandbox"
-            for index, line in enumerate(content.strip().splitlines(), start=4):
-                worksheet.cell(row=index, column=1, value=line)
+            row_index = 4
+            for line in content.strip().splitlines():
+                chunks = [
+                    line[start : start + EXCEL_CELL_MAX_CHARS]
+                    for start in range(0, len(line), EXCEL_CELL_MAX_CHARS)
+                ] or [""]
+                for chunk in chunks:
+                    worksheet.cell(
+                        row=row_index,
+                        column=1,
+                        value=spreadsheet_literal(chunk),
+                    )
+                    row_index += 1
             worksheet.column_dimensions["A"].width = 80
             workbook.save(xlsx_path)
 
@@ -609,13 +697,6 @@ class Handler(BaseHTTPRequestHandler):
                 paragraph.text = line
             presentation.save(pptx_path)
 
-            subprocess.run(
-                ["pandoc", str(markdown_path), "--output", str(docx_path)],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
             subprocess.run(
                 [
                     "libreoffice",
@@ -649,18 +730,18 @@ class Handler(BaseHTTPRequestHandler):
                 },
             )
             return
-        except (KeyError, ValueError) as error:
+        except (IllegalCharacterError, KeyError, ValueError):
             remove_job(job_dir)
             self.send_json(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
-                {"error": f"Document generation failed: {error}"},
+                {"error": "Document generation failed"},
             )
             return
-        except OSError as error:
+        except OSError:
             remove_job(job_dir)
             self.send_json(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
-                {"error": f"Document tool could not start: {error}"},
+                {"error": "Document tool could not start"},
             )
             return
 
@@ -684,26 +765,30 @@ class Handler(BaseHTTPRequestHandler):
                         {"error": "Generated artifacts exceed the session storage limit"},
                     )
                     return
-        except OSError as error:
+        except OSError:
             remove_job(job_dir)
             self.send_json(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
-                {"error": f"Unable to validate generated artifacts: {error}"},
+                {"error": "Unable to validate generated artifacts"},
             )
             return
 
-        self.send_json(
-            HTTPStatus.OK,
-            {
-                "jobId": job_id,
-                "files": [
-                    file_metadata(docx_path, job_id),
-                    file_metadata(pdf_path, job_id),
-                    file_metadata(pptx_path, job_id),
-                    file_metadata(xlsx_path, job_id),
-                ],
-            },
-        )
+        try:
+            files = [
+                file_metadata(docx_path, job_id),
+                file_metadata(pdf_path, job_id),
+                file_metadata(pptx_path, job_id),
+                file_metadata(xlsx_path, job_id),
+            ]
+        except OSError:
+            remove_job(job_dir)
+            self.send_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": "Unable to read generated artifact metadata"},
+            )
+            return
+
+        self.send_json(HTTPStatus.OK, {"jobId": job_id, "files": files})
 
     def log_message(self, format_string: str, *args: object) -> None:
         status = args[1] if len(args) > 1 else None

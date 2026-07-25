@@ -219,6 +219,10 @@ Custom Container가 임의 command와 shell argument를 받게 하지 않는다.
 | `POST /edit` | 허용 목록에 있는 선언적 operation만 적용 |
 | `GET /files/{job}/{name}` | 허용된 파일 이름만 streaming 전달 |
 
+`office_gateway/`는 이 내부 API 앞에 두는 사용자용 reference gateway다. Azure token, pool endpoint, session identifier와 container `jobId`를 숨기고 `/api/document-jobs` 아래의 public job ID, 안전한 파일 metadata, 승인 API만 노출한다. 실습용 `X-Demo-User` header는 production 인증이 아니며 실제 배포에서는 Entra access token 검증과 tenant authorization으로 대체한다.
+
+`python_gateway/`는 Python Agent 앞의 사용자용 reference gateway다. Multipart 자연어·첨부파일 요청을 `/api/analysis-jobs`로 받고 public job ID, 안전한 실행 결과와 artifact metadata만 반환한다. 승인 API는 코드를 다시 실행하지 않고 최초 실행에서 staging한 동일 artifact의 hash를 재검증해 승격한다.
+
 허용할 편집 operation 예:
 
 - DOCX: text placeholder 교체, section 추가, metadata 제거

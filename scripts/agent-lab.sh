@@ -87,15 +87,17 @@ jq -e '
   and (.promotions | length) == 2
   and (.promotions | all(.promoted == true))
 ' "$output" >/dev/null || die "Approved run assertions failed: $(cat "$output")"
-test -s "$APPROVED_DIR/summary.json"
-test -s "$APPROVED_DIR/monthly_sales.png"
-python3 - "$APPROVED_DIR/monthly_sales.png" <<'PY'
+APPROVED_RUN_DIR=$(find "$APPROVED_DIR" -mindepth 1 -maxdepth 1 -type d | head -1)
+test -n "$APPROVED_RUN_DIR"
+test -s "$APPROVED_RUN_DIR/summary.json"
+test -s "$APPROVED_RUN_DIR/monthly_sales.png"
+python3 - "$APPROVED_RUN_DIR/monthly_sales.png" <<'PY'
 import sys
 
 with open(sys.argv[1], "rb") as source:
     assert source.read(8) == b"\x89PNG\r\n\x1a\n", "promoted file is not a PNG"
 PY
-jq -e '.monthly_sales["2026-01"] == 200' "$APPROVED_DIR/summary.json" >/dev/null
+jq -e '.monthly_sales["2026-01"] == 200' "$APPROVED_RUN_DIR/summary.json" >/dev/null
 
 log "5/6 오류 -> 코드 수정 -> 재실행 루프"
 output="$WORK_DIR/run-retry.json"

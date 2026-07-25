@@ -115,6 +115,10 @@ class StagingTests(unittest.TestCase):
         with self.assertRaises(staging.StagingError):
             self.store.stage("summary.json", b"")
 
+    def test_reject_reserved_manifest_name(self) -> None:
+        with self.assertRaises(staging.StagingError):
+            self.store.stage("manifest.json", b"{}")
+
     def test_promotion_requires_approval(self) -> None:
         artifact = self.store.stage("summary.json", b'{"a": 1}')
         approval = staging.ApprovalService(self.root / "approved")
@@ -136,6 +140,35 @@ class StagingTests(unittest.TestCase):
         approval = staging.ApprovalService(self.root / "approved")
         with self.assertRaises(staging.StagingError):
             approval.promote(artifact, approved=True, approver="junwoo")
+
+    def test_batch_promotion_is_all_or_nothing(self) -> None:
+        first = self.store.stage("first.json", b'{"a": 1}')
+        second = self.store.stage("second.json", b'{"b": 2}')
+        second.path.chmod(0o640)
+        second.path.write_bytes(b'{"tampered": true}')
+        destination = self.root / "batch-approved"
+        with self.assertRaises(staging.StagingError):
+            staging.promote_batch(
+                [first, second],
+                destination,
+                approver="junwoo",
+            )
+        self.assertFalse(destination.exists())
+
+    def test_batch_promotion_is_idempotent_for_same_hashes(self) -> None:
+        first = self.store.stage("first.json", b'{"a": 1}')
+        destination = self.root / "batch-approved"
+        initial = staging.promote_batch(
+            [first],
+            destination,
+            approver="junwoo",
+        )
+        repeated = staging.promote_batch(
+            [first],
+            destination,
+            approver="junwoo",
+        )
+        self.assertEqual(initial[0]["sha256"], repeated[0]["sha256"])
 
     def test_manifest_lists_artifacts(self) -> None:
         self.store.stage("summary.json", b'{"a": 1}')
@@ -288,6 +321,24 @@ class OrchestratorTests(unittest.TestCase):
         self.assertFalse(result.promotions[0]["promoted"])
         self.assertTrue(session.deleted)
 
+    def test_approved_run_promotes_batch_to_request_directory(self) -> None:
+        session = FakeSession()
+        result = self._run(
+            session,
+            expected_outputs=("summary.json",),
+            approve=True,
+            approver="user-demo",
+        )
+        self.assertTrue(result.promotions[0]["promoted"])
+        self.assertTrue(
+            (
+                self.settings.approved_dir
+                / result.request_id
+                / "summary.json"
+            ).is_file()
+        )
+        self.assertNotIn("target", result.user_view()["promotions"][0])
+
     def test_retry_loop_recovers_from_execution_error(self) -> None:
         session = FakeSession(failures=1)
         result = self._run(session, expected_outputs=("summary.json",))
@@ -328,6 +379,17 @@ class OrchestratorTests(unittest.TestCase):
         result = self._run(session, expected_outputs=("summary.json",))
         self.assertNotIn("sessionIdentifier", result.user_view())
         self.assertIn("sessionIdentifier", result.audit_view())
+
+    def test_user_view_hides_request_id_and_internal_paths(self) -> None:
+        session = FakeSession()
+        result = self._run(session, expected_outputs=("summary.json",))
+        result.plan = "Read /mnt/data/sales.csv"
+        result.stdout = f"saved /tmp/result.json in {result.session_identifier}"
+        view = result.user_view()
+        self.assertNotIn("requestId", view)
+        self.assertNotIn("/mnt/data", view["plan"])
+        self.assertNotIn("/tmp", view["stdout"])
+        self.assertNotIn(result.session_identifier, view["stdout"])
 
     def test_input_attachment_is_not_staged_by_default(self) -> None:
         session = FakeSession()

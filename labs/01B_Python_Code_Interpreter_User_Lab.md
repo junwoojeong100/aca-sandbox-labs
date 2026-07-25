@@ -16,6 +16,8 @@
 
 예상 시간은 20~30분이다.
 
+> 이 문서는 최종 사용자가 아니라 **사용자 경험을 REST API로 검증하는 실습 운영자·개발자**가 수행한다. 실제 사용자는 terminal, Azure resource, token 또는 session identifier를 다루지 않는다.
+
 ## 1. 사전 조건
 
 관리자가 [실습 1A](01A_Python_Code_Interpreter_Admin_Lab.md)를 완료해 다음을 준비해야 한다.
@@ -25,6 +27,8 @@
 - `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`
 - 추론 identity의 `Cognitive Services OpenAI User` 역할
 - 사용자에게 token, pool endpoint, session identifier를 노출하지 않는 backend
+- repository root에서 실행할 수 있는 Bash, `curl`, `jq`, Python 3
+- Terminal A에서 `az account show`가 성공하는 Azure CLI 로그인
 
 이 repository에서는 `python_gateway/`가 AI Workspace backend를 대리한다. Gateway만 LLM 설정, pool endpoint, Entra token과 session identifier를 관리하며 사용자 API에는 public analysis job ID만 반환한다.
 
@@ -32,20 +36,25 @@
 
 ## 2. 사용자 Gateway 실행
 
-다음 명령은 관리자 또는 실습 운영자가 repository root에서 실행한다. 실습 1A에서 설정한 실제 LLM 환경 변수를 사용한다.
+두 terminal을 사용한다. 환경 변수는 terminal 간에 자동으로 공유되지 않으므로 각 블록을 지정된 terminal에서 실행한다.
+
+**Terminal A - Gateway:** 관리자 또는 실습 운영자가 repository root에서 실행한다. 가능하면 실습 1A §16.3에서 환경 변수를 설정한 같은 terminal을 사용한다. 새 terminal이라면 `AZURE_OPENAI_ENDPOINT`와 `AZURE_OPENAI_DEPLOYMENT`를 먼저 다시 export한다.
 
 ```bash
 export RESOURCE_GROUP="rg-ai-workspace-sandbox-lab"
 export PYTHON_POOL_NAME="ai-workspace-python-sbx"
 export LLM_PROVIDER="azure-openai"
-export AZURE_OPENAI_ENDPOINT="https://<ACCOUNT>.openai.azure.com"
-export AZURE_OPENAI_DEPLOYMENT="<DEPLOYMENT_NAME>"
 export REASONING_EFFORT="medium"
+
+: "${AZURE_OPENAI_ENDPOINT:?실습 1A §16.3의 endpoint를 export하세요}"
+: "${AZURE_OPENAI_DEPLOYMENT:?실습 1A §16.3의 deployment 이름을 export하세요}"
 
 python3 -m python_gateway.server
 ```
 
-Gateway는 기본적으로 `http://127.0.0.1:8089`에서 실행된다. 다른 terminal에서 사용자 API 변수를 설정한다.
+Gateway는 기본적으로 `http://127.0.0.1:8089`에서 실행된다. 이 terminal은 Gateway가 종료될 때까지 그대로 둔다.
+
+**Terminal B - 사용자 API:** 새 terminal을 열고 repository root로 이동한 뒤 사용자 API 변수를 설정한다.
 
 ```bash
 export PYTHON_USER_API="http://127.0.0.1:8089"
@@ -76,6 +85,8 @@ CSV
 ## 4. 실제 LLM에 자연어 요청
 
 자연어, 첨부파일과 필수 결과 파일 이름을 multipart request로 전달한다.
+
+Reference Gateway는 이 요청을 동기식으로 처리하므로 LLM 생성과 session 실행이 끝날 때까지 `curl`이 대기한다. Production UI에서는 같은 backend 상태를 이용해 별도의 진행 화면을 제공한다.
 
 ```bash
 curl --fail-with-body --silent --show-error \
@@ -185,5 +196,7 @@ curl --fail-with-body --silent --show-error \
   "$PYTHON_USER_API/api/analysis-jobs/$ANALYSIS_JOB_ID" \
   --header "X-Demo-User: $DEMO_USER"
 ```
+
+Gateway를 실행한 terminal에서 `Ctrl+C`를 눌러 local reference server를 종료한다.
 
 Azure pool과 모델 배포의 정리는 관리자가 [실습 1A](01A_Python_Code_Interpreter_Admin_Lab.md)에서 수행한다.

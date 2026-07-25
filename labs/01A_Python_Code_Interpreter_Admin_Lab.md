@@ -19,6 +19,8 @@ Azure Container Apps Dynamic Sessions의 PythonLTS pool에서 다음을 실제 �
 
 이 문서는 관리자가 Pool, RBAC, network, quota, 실행 한도와 LLM backend를 구성·검증하는 절차다. 자연어 요청과 승인 중심의 사용자 실습은 [실습 1B](01B_Python_Code_Interpreter_User_Lab.md)에서 수행한다.
 
+Fast Path와 수동 절차는 같은 리소스를 만드는 **대체 경로**다. 처음 수행한다면 Fast Path만 실행하고, 실패 원인을 찾거나 개별 Azure 명령을 학습할 때만 2~15절의 수동 절차를 사용한다.
+
 ## 1. 사전 조건
 
 - Bash 또는 Azure Cloud Shell
@@ -30,6 +32,13 @@ Azure Container Apps Dynamic Sessions의 PythonLTS pool에서 다음을 실제 �
 - Dynamic Sessions 지원 리전과 SessionPools quota
 
 로컬 Bash에서는 먼저 `az login`을 실행한다. Cloud Shell은 이미 로그인돼 있으므로 생략한다.
+
+현재 subscription과 필수 도구를 확인한다.
+
+```bash
+az account show --query '{name:name,id:id,user:user.name}' --output table
+command -v az curl jq python3 unzip file
+```
 
 ### 권장 Fast Path
 
@@ -50,15 +59,18 @@ bash scripts/python-lab.sh
 RUN_LIMIT_TESTS=yes bash scripts/python-lab.sh
 ```
 
-관리자 구성이 끝나면 [실습 1B](01B_Python_Code_Interpreter_User_Lab.md)에서 자연어 요청부터 LLM 코드 생성, 재시도와 승인까지의 사용자 흐름을 검증한다.
+Sandbox Fast Path가 끝나면 16절에서 실제 LLM을 연결하고, 이어서 [실습 1B](01B_Python_Code_Interpreter_User_Lab.md)에서 자연어 요청부터 재시도와 승인까지의 사용자 흐름을 검증한다.
 
 ## 2. 변수 설정
 
 ```bash
-export SUBSCRIPTION_ID="<SUBSCRIPTION_ID>"
+export SUBSCRIPTION_ID="${SUBSCRIPTION_ID:-$(az account show --query id --output tsv)}"
 export RESOURCE_GROUP="rg-ai-workspace-sandbox-lab"
 export LOCATION="koreacentral"
 export PYTHON_POOL_NAME="ai-workspace-python-sbx"
+export PYTHON_API_VERSION="${PYTHON_API_VERSION:-2025-10-02-preview}"
+export SESSION_API_VERSION="${SESSION_API_VERSION:-2025-02-02-preview}"
+export REPO_ROOT="$PWD"
 export LAB_WORK_DIR="$PWD/.work/python-manual"
 
 az account set --subscription "$SUBSCRIPTION_ID"
@@ -66,6 +78,10 @@ az account show --query '{subscription:id,user:user.name}' --output json
 mkdir -p "$LAB_WORK_DIR"
 cd "$LAB_WORK_DIR"
 ```
+
+이 시점부터 15절까지의 수동 명령은 repository root가 아니라 `$LAB_WORK_DIR`에서 실행한다.
+
+두 API version은 이 repository에서 검증한 값이다. Preview API 오류가 발생해도 임의로 바꾸지 말고 [공식 data-plane API 문서](https://learn.microsoft.com/rest/api/containerapps/)에서 현재 endpoint와 request shape를 확인한 뒤 환경 변수만 재정의한다.
 
 ## 3. CLI와 provider 준비
 
@@ -120,6 +136,17 @@ az quota usage show \
 
 `BadRequest`가 나오면 무제한으로 해석하지 말고 Azure service limits와 Portal의 My quotas를 확인한다.
 
+새 Python pool을 만들려면 `SessionPools`의 `limit - usage`가 최소 1이어야 한다. 이미 같은 pool이 존재해 재사용하는 경우에는 추가 quota가 필요하지 않다.
+
+CLI가 값을 반환하지 않거나 사용 가능 수량이 0이면 [Azure Portal My quotas](https://portal.azure.com/#view/Microsoft_Azure_Capacity/QuotaMenuBlade/~/myQuotas)에서 다음과 같이 확인한다.
+
+1. Provider를 **Azure Container Apps**로 선택한다.
+2. `LOCATION`과 같은 region을 선택한다.
+3. `Session pools` 현재 사용량과 limit을 확인한다.
+4. 부족하면 quota 증가를 요청하고 승인 후 다시 실행한다.
+
+Regional quota 증가는 빠르게 승인될 수도 있지만 지원 검토가 필요하면 며칠 걸릴 수 있다.
+
 ## 5. Resource Group과 Python pool 생성
 
 ```bash
@@ -168,6 +195,8 @@ az containerapp sessionpool show \
 
 pool을 생성한 사용자는 상위 범위의 Contributor 권한을 이미 가지고 있어야 한다. 데이터 평면 API 호출을 위해 pool 범위에 Session Executor를 추가한다.
 
+`Contributor`는 resource를 만들 수 있지만 role assignment 권한은 없다. 다음 명령이 `AuthorizationFailed`로 실패하면 `Owner` 또는 `User Access Administrator`에게 이 절의 역할 할당을 요청한다.
+
 ```bash
 export PYTHON_POOL_ID=$(az containerapp sessionpool show \
   --name "$PYTHON_POOL_NAME" \
@@ -175,15 +204,31 @@ export PYTHON_POOL_ID=$(az containerapp sessionpool show \
   --query id \
   --output tsv)
 
-export CALLER_OBJECT_ID=$(az ad signed-in-user show \
-  --query id \
-  --output tsv)
+if [[ -z "${CALLER_OBJECT_ID:-}" ]]; then
+  export CALLER_OBJECT_ID=$(az ad signed-in-user show \
+    --query id \
+    --output tsv)
+  export CALLER_PRINCIPAL_TYPE="User"
+fi
+export CALLER_PRINCIPAL_TYPE="${CALLER_PRINCIPAL_TYPE:-User}"
 
 az role assignment create \
   --role "Azure ContainerApps Session Executor" \
   --assignee-object-id "$CALLER_OBJECT_ID" \
-  --assignee-principal-type User \
+  --assignee-principal-type "$CALLER_PRINCIPAL_TYPE" \
   --scope "$PYTHON_POOL_ID"
+```
+
+Service Principal로 실행한다면 미리 `CALLER_OBJECT_ID`를 principal object ID로, `CALLER_PRINCIPAL_TYPE=ServicePrincipal`로 설정한다.
+
+역할 할당을 확인한다.
+
+```bash
+az role assignment list \
+  --assignee "$CALLER_OBJECT_ID" \
+  --scope "$PYTHON_POOL_ID" \
+  --query "[?roleDefinitionName=='Azure ContainerApps Session Executor'].{role:roleDefinitionName,scope:scope}" \
+  --output table
 ```
 
 역할 전파는 수 분 걸릴 수 있다. API가 403을 반환하면 30~60초 기다린 뒤 token을 다시 발급한다.
@@ -214,7 +259,7 @@ export PYTHON_SESSION_ID="python-$(uuidgen | tr '[:upper:]' '[:lower:]')"
 ```bash
 curl --fail-with-body --silent --show-error \
   --request POST \
-  "$PYTHON_ENDPOINT/executions?api-version=2025-10-02-preview&identifier=$PYTHON_SESSION_ID" \
+  "$PYTHON_ENDPOINT/executions?api-version=$PYTHON_API_VERSION&identifier=$PYTHON_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN" \
   --header "Content-Type: application/json" \
   --data '{
@@ -234,7 +279,7 @@ cat first-execution.json
 - `status`가 `Succeeded`
 - `result.stdout`에 validation 문구 포함
 
-> 2026-07-24 한국 중부의 `2025-10-02-preview` endpoint에서 execution 속성은 JSON 최상위에 있어야 했다. `properties`로 감싸면 `SessionPropertiesMissing`이 발생했다.
+> 2026-07-24 한국 중부의 기본 `PYTHON_API_VERSION` endpoint에서 execution 속성은 JSON 최상위에 있어야 했다. `properties`로 감싸면 `SessionPropertiesMissing`이 발생했다.
 
 ## 8.1 사전 설치 라이브러리 확인
 
@@ -243,7 +288,7 @@ cat first-execution.json
 ```bash
 curl --fail-with-body --silent --show-error \
   --request POST \
-  "$PYTHON_ENDPOINT/executions?api-version=2025-10-02-preview&identifier=$PYTHON_SESSION_ID" \
+  "$PYTHON_ENDPOINT/executions?api-version=$PYTHON_API_VERSION&identifier=$PYTHON_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN" \
   --header "Content-Type: application/json" \
   --data '{
@@ -351,7 +396,7 @@ for SPEC in "sales.csv:sales.csv" "analyze_sales.py:analyze_sales.py"; do
 
   curl --fail-with-body --silent --show-error \
     --request POST \
-    "$PYTHON_ENDPOINT/files?api-version=2025-10-02-preview&identifier=$PYTHON_SESSION_ID" \
+    "$PYTHON_ENDPOINT/files?api-version=$PYTHON_API_VERSION&identifier=$PYTHON_SESSION_ID" \
     --header "Authorization: Bearer $TOKEN" \
     --form "file=@$LOCAL_NAME;filename=$REMOTE_NAME" \
     --output /dev/null \
@@ -366,7 +411,7 @@ done
 ```bash
 curl --fail-with-body --silent --show-error \
   --request POST \
-  "$PYTHON_ENDPOINT/executions?api-version=2025-10-02-preview&identifier=$PYTHON_SESSION_ID" \
+  "$PYTHON_ENDPOINT/executions?api-version=$PYTHON_API_VERSION&identifier=$PYTHON_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN" \
   --header "Content-Type: application/json" \
   --data '{
@@ -386,7 +431,7 @@ HTTP 200과 `status: Succeeded`를 확인한다.
 
 ```bash
 curl --fail-with-body --silent --show-error \
-  "$PYTHON_ENDPOINT/files?api-version=2025-10-02-preview&identifier=$PYTHON_SESSION_ID" \
+  "$PYTHON_ENDPOINT/files?api-version=$PYTHON_API_VERSION&identifier=$PYTHON_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN" \
   --output session-files.json \
   --write-out 'list files HTTP %{http_code}\n'
@@ -396,7 +441,7 @@ cat session-files.json
 for FILE in monthly_sales.png summary.json; do
   curl --fail-with-body --silent --show-error \
     --output "$FILE" \
-    "$PYTHON_ENDPOINT/files/$FILE/content?api-version=2025-10-02-preview&identifier=$PYTHON_SESSION_ID" \
+    "$PYTHON_ENDPOINT/files/$FILE/content?api-version=$PYTHON_API_VERSION&identifier=$PYTHON_SESSION_ID" \
     --header "Authorization: Bearer $TOKEN" \
     --write-out "$FILE download HTTP %{http_code}\n"
 done
@@ -427,7 +472,7 @@ fi
 ```bash
 curl --fail-with-body --silent --show-error \
   --request POST \
-  "$PYTHON_ENDPOINT/executions?api-version=2025-10-02-preview&identifier=$PYTHON_SESSION_ID" \
+  "$PYTHON_ENDPOINT/executions?api-version=$PYTHON_API_VERSION&identifier=$PYTHON_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN" \
   --header "Content-Type: application/json" \
   --data '{
@@ -450,7 +495,7 @@ cat egress-validation.json
 export SECOND_SESSION_ID="python-$(uuidgen | tr '[:upper:]' '[:lower:]')"
 
 curl --fail-with-body --silent --show-error \
-  "$PYTHON_ENDPOINT/files?api-version=2025-10-02-preview&identifier=$SECOND_SESSION_ID" \
+  "$PYTHON_ENDPOINT/files?api-version=$PYTHON_API_VERSION&identifier=$SECOND_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN" \
   --output second-session-files.json \
   --write-out 'second session list HTTP %{http_code}\n'
@@ -459,7 +504,7 @@ cat second-session-files.json
 
 curl --fail-with-body --silent --show-error \
   --request POST \
-  "$PYTHON_ENDPOINT/executions?api-version=2025-10-02-preview&identifier=$SECOND_SESSION_ID" \
+  "$PYTHON_ENDPOINT/executions?api-version=$PYTHON_API_VERSION&identifier=$SECOND_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN" \
   --header "Content-Type: application/json" \
   --data '{
@@ -478,7 +523,7 @@ cat second-session-listdir.json
 curl --silent \
   --output /dev/null \
   --write-out 'cross-session download HTTP %{http_code}\n' \
-  "$PYTHON_ENDPOINT/files/sales.csv/content?api-version=2025-10-02-preview&identifier=$SECOND_SESSION_ID" \
+  "$PYTHON_ENDPOINT/files/sales.csv/content?api-version=$PYTHON_API_VERSION&identifier=$SECOND_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN"
 ```
 
@@ -504,7 +549,7 @@ curl --silent \
 ```bash
 curl --fail-with-body --silent --show-error \
   --request DELETE \
-  "$PYTHON_ENDPOINT/session?api-version=2025-02-02-preview&identifier=$SECOND_SESSION_ID" \
+  "$PYTHON_ENDPOINT/session?api-version=$SESSION_API_VERSION&identifier=$SECOND_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN" \
   --output /dev/null \
   --write-out 'delete second session HTTP %{http_code}\n'
@@ -517,7 +562,7 @@ curl --fail-with-body --silent --show-error \
 ```bash
 curl --silent --show-error \
   --request POST \
-  "$PYTHON_ENDPOINT/executions?api-version=2025-10-02-preview&identifier=$PYTHON_SESSION_ID" \
+  "$PYTHON_ENDPOINT/executions?api-version=$PYTHON_API_VERSION&identifier=$PYTHON_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN" \
   --header "Content-Type: application/json" \
   --data '{
@@ -537,7 +582,7 @@ jq '{status: .status, stderr: .result.stderr}' failed-execution.json
 ```bash
 curl --fail-with-body --silent --show-error \
   --request POST \
-  "$PYTHON_ENDPOINT/executions?api-version=2025-10-02-preview&identifier=$PYTHON_SESSION_ID" \
+  "$PYTHON_ENDPOINT/executions?api-version=$PYTHON_API_VERSION&identifier=$PYTHON_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN" \
   --header "Content-Type: application/json" \
   --data '{
@@ -572,7 +617,7 @@ jq '{status: .status, stdout: .result.stdout}' fixed-execution.json
 ```bash
 time curl --silent --show-error \
   --request POST \
-  "$PYTHON_ENDPOINT/executions?api-version=2025-10-02-preview&identifier=$PYTHON_SESSION_ID" \
+  "$PYTHON_ENDPOINT/executions?api-version=$PYTHON_API_VERSION&identifier=$PYTHON_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN" \
   --header "Content-Type: application/json" \
   --data '{
@@ -591,7 +636,7 @@ cat timeout-validation.json
 ```bash
 curl --silent --show-error \
   --request POST \
-  "$PYTHON_ENDPOINT/executions?api-version=2025-10-02-preview&identifier=$PYTHON_SESSION_ID" \
+  "$PYTHON_ENDPOINT/executions?api-version=$PYTHON_API_VERSION&identifier=$PYTHON_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN" \
   --header "Content-Type: application/json" \
   --data '{
@@ -625,7 +670,7 @@ cat memory-validation.json
 
 ```bash
 curl --fail-with-body --silent --show-error \
-  "$PYTHON_ENDPOINT/session?api-version=2025-02-02-preview&identifier=$PYTHON_SESSION_ID" \
+  "$PYTHON_ENDPOINT/session?api-version=$SESSION_API_VERSION&identifier=$PYTHON_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN"
 ```
 
@@ -653,14 +698,14 @@ printf 'a,b\n1,2\n' > cleanup-probe.csv
 
 curl --fail-with-body --silent --show-error \
   --request POST \
-  "$PYTHON_ENDPOINT/files?api-version=2025-10-02-preview&identifier=$CLEANUP_SESSION_ID" \
+  "$PYTHON_ENDPOINT/files?api-version=$PYTHON_API_VERSION&identifier=$CLEANUP_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN" \
   --form "file=@cleanup-probe.csv;filename=cleanup-probe.csv" \
   --output /dev/null \
   --write-out 'upload HTTP %{http_code}\n'
 
 curl --fail-with-body --silent --show-error \
-  "$PYTHON_ENDPOINT/files?api-version=2025-10-02-preview&identifier=$CLEANUP_SESSION_ID" \
+  "$PYTHON_ENDPOINT/files?api-version=$PYTHON_API_VERSION&identifier=$CLEANUP_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN" \
   --output before-cleanup.json
 
@@ -672,7 +717,7 @@ session을 삭제한다.
 ```bash
 curl --fail-with-body --silent --show-error \
   --request DELETE \
-  "$PYTHON_ENDPOINT/session?api-version=2025-02-02-preview&identifier=$CLEANUP_SESSION_ID" \
+  "$PYTHON_ENDPOINT/session?api-version=$SESSION_API_VERSION&identifier=$CLEANUP_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN" \
   --output /dev/null \
   --write-out 'delete session HTTP %{http_code}\n'
@@ -682,7 +727,7 @@ curl --fail-with-body --silent --show-error \
 
 ```bash
 curl --fail-with-body --silent --show-error \
-  "$PYTHON_ENDPOINT/files?api-version=2025-10-02-preview&identifier=$CLEANUP_SESSION_ID" \
+  "$PYTHON_ENDPOINT/files?api-version=$PYTHON_API_VERSION&identifier=$CLEANUP_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN" \
   --output after-cleanup.json
 
@@ -691,7 +736,7 @@ cat after-cleanup.json
 curl --silent \
   --output /dev/null \
   --write-out 'download after cleanup HTTP %{http_code}\n' \
-  "$PYTHON_ENDPOINT/files/cleanup-probe.csv/content?api-version=2025-10-02-preview&identifier=$CLEANUP_SESSION_ID" \
+  "$PYTHON_ENDPOINT/files/cleanup-probe.csv/content?api-version=$PYTHON_API_VERSION&identifier=$CLEANUP_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN"
 ```
 
@@ -725,23 +770,164 @@ curl --silent \
 | `Request timed out waiting for code execution to complete` | 220초 한도 초과. 작업 분할 또는 비동기 compute |
 | `Execution aborted` | 메모리 한도 초과. 데이터 분할 처리 |
 | `SessionPropertiesMissing` | execution 속성의 `properties` 래퍼 제거 |
+| `SessionRequestValidationFailed` | `identifier`, `api-version`, endpoint와 method 확인. 응답의 `target`, `traceId` 기록 |
+| `SessionRequestNotSupported` | 현재 API version에서 endpoint 또는 HTTP method가 지원되는지 공식 data-plane API 문서 확인 |
 | `SessionWithIdentifierNotFound` | 새 identifier로 업로드부터 재실행 |
 | 다른 session의 파일이 안 보임 | 정상 동작이다. session은 서로 격리된다 |
 | Python import 오류 | 사전 설치 목록 확인 후 필요하면 Custom Container 검토 |
 
-## 16. 정리
+## 16. LLM Agent backend 구성
+
+Python pool 검증이 끝났으면 사용자가 자연어로 요청할 수 있도록 Agent backend와 실제 LLM을 연결한다. 사용자는 이 설정과 credential을 보지 않는다.
+
+### 16.1 구성 요소
+
+| 구성 요소 | 관리자 책임 |
+| --- | --- |
+| `agent/policy.py` | 위험 요청을 LLM과 session 할당 전에 분류 |
+| `agent/broker.py` | token, endpoint와 identifier를 backend에서 관리 |
+| `agent/llm.py` | 실제 모델 호출과 생성 코드 수신 |
+| `agent/staging.py` | 파일 형식, macro, 경로와 hash 검사 |
+| `agent/orchestrator.py` | 생성·실행·재시도·삭제·승인 흐름 연결 |
+
+먼저 실제 모델 없이 통제 장치를 검증한다.
+
+```bash
+cd "${REPO_ROOT:-$PWD}"
+test -f scripts/agent-lab.sh || {
+  echo "repository root에서 실행해야 합니다" >&2
+  exit 1
+}
+export RESOURCE_GROUP="${RESOURCE_GROUP:-rg-ai-workspace-sandbox-lab}"
+export SUBSCRIPTION_ID="${SUBSCRIPTION_ID:-$(az account show --query id --output tsv)}"
+
+python3 -m unittest discover -s tests -v
+LLM_PROVIDER=stub bash scripts/agent-lab.sh
+```
+
+### 16.2 Foundry(Azure OpenAI) 모델 배포
+
+기존 배포가 있으면 이 절의 생성 명령을 건너뛰고 account endpoint와 deployment 이름만 확인한다. 실습용 배포는 가용 쿼타 전량이 아니라 작은 capacity부터 시작한다.
+
+먼저 해당 모델의 가용 쿼타와 기존 배포를 확인한다.
+
+```bash
+export LLM_LOCATION="koreacentral"
+export LLM_MODEL="gpt-5.6-terra"
+
+az cognitiveservices usage list \
+  --location "$LLM_LOCATION" \
+  --query "[?name.value=='OpenAI.GlobalStandard.$LLM_MODEL'].{limit:limit,used:currentValue}" \
+  --output table
+
+az cognitiveservices account list --query '[].{name:name,rg:resourceGroup}' --output tsv \
+| while read -r NAME GROUP; do
+    az cognitiveservices account deployment list \
+      --name "$NAME" \
+      --resource-group "$GROUP" \
+      --query "[?properties.model.name=='$LLM_MODEL'].{account:'$NAME',rg:'$GROUP',deployment:name,capacity:sku.capacity}" \
+      --output tsv 2>/dev/null
+  done
+```
+
+가용량이 10K TPM보다 적으면 새 배포를 만들지 않는다. 접근 권한이 있는 기존 배포를 재사용하거나 quota 증설 후 진행한다.
+
+새 실습용 account와 deployment가 필요할 때만 다음을 실행한다. `LLM_ACCOUNT`는 Azure 전체에서 고유해야 한다.
+
+```bash
+export LLM_RESOURCE_GROUP="$RESOURCE_GROUP"
+export LLM_ACCOUNT="${LLM_ACCOUNT:-aiwsllm$(printf '%s' "$SUBSCRIPTION_ID" | tr -d '-' | cut -c1-20)}"
+
+az cognitiveservices account create \
+  --name "$LLM_ACCOUNT" \
+  --resource-group "$LLM_RESOURCE_GROUP" \
+  --kind AIServices \
+  --sku S0 \
+  --location "$LLM_LOCATION" \
+  --custom-domain "$LLM_ACCOUNT" \
+  --assign-identity \
+  --yes \
+  --output none
+
+az cognitiveservices account deployment create \
+  --name "$LLM_ACCOUNT" \
+  --resource-group "$LLM_RESOURCE_GROUP" \
+  --deployment-name "$LLM_MODEL" \
+  --model-name "$LLM_MODEL" \
+  --model-version 2026-07-09 \
+  --model-format OpenAI \
+  --sku-name GlobalStandard \
+  --sku-capacity 10 \
+  --output none
+```
+
+`sku-capacity 10`은 10K TPM이다. 배포가 실패하면 해당 모델·SKU의 subscription quota와 기존 배포 사용량을 먼저 확인한다.
+기본 account 이름을 사용할 수 없으면 영문 소문자와 숫자로 된 다른 전역 고유 이름을 `LLM_ACCOUNT`에 지정한다.
+
+### 16.3 추론 RBAC와 backend 환경
+
+기존 배포를 재사용한다면 먼저 실제 account 이름, Resource Group과 deployment 이름으로 `LLM_ACCOUNT`, `LLM_RESOURCE_GROUP`, `LLM_MODEL`을 설정한다.
+
+```bash
+export LLM_ACCOUNT_ID=$(az cognitiveservices account show \
+  --name "$LLM_ACCOUNT" \
+  --resource-group "$LLM_RESOURCE_GROUP" \
+  --query id \
+  --output tsv)
+
+az role assignment create \
+  --role "Cognitive Services OpenAI User" \
+  --assignee-object-id "$(az ad signed-in-user show --query id --output tsv)" \
+  --assignee-principal-type User \
+  --scope "$LLM_ACCOUNT_ID"
+
+export LLM_PROVIDER="azure-openai"
+export AZURE_OPENAI_ENDPOINT="https://$LLM_ACCOUNT.openai.azure.com"
+export AZURE_OPENAI_DEPLOYMENT="$LLM_MODEL"
+export REASONING_EFFORT="medium"
+```
+
+Production에서는 로그인한 사용자가 아니라 Agent backend의 Managed Identity에 두 역할을 부여한다.
+
+- Python pool 범위: `Azure ContainerApps Session Executor`
+- Azure OpenAI account 범위: `Cognitive Services OpenAI User`
+
+구성이 끝나면 **리소스를 정리하기 전에** [실습 1B](01B_Python_Code_Interpreter_User_Lab.md)에서 실제 LLM의 자연어 요청, 코드 생성, 실행과 승인을 검증한다.
+
+### 16.4 관리자 확인 사항
+
+- 정책 엔진이 LLM 호출보다 먼저 실행됨
+- 생성 코드가 실행 전에 검사됨
+- 성공 판정은 `stderr`가 아니라 platform `status`를 사용함
+- 필수 산출물 이름을 LLM에 전달하고 누락 시 재시도 또는 실패 처리함
+- 재시도 횟수와 실행 timeout이 제한됨
+- session identifier와 token이 사용자 응답에 없음
+- 성공·실패와 관계없이 session이 삭제됨
+- 승인하지 않은 artifact는 staging 밖으로 이동하지 않음
+
+## 17. 정리
 
 > 현재 리소스를 보존해야 하면 이 절을 실행하지 않는다.
 > Office 실습에서 같은 Resource Group을 사용할 예정이면 Python pool만 선택적으로 삭제하고 Resource Group은 유지한다.
+> 실습 1B를 수행할 예정이면 먼저 16절의 LLM 연결과 실습 1B 검증을 끝낸다.
 
 session 단위 정리는 [14.1절](#141-session-종료와-임시-파일-자동-정리)에서 이미 검증했다. 이 절은 Azure 리소스 자체를 삭제한다.
 
-Session만 즉시 삭제:
+Fast Path로 시작한 경우에도 동작하도록 기본 이름을 다시 설정하고 삭제 대상을 확인한다.
+
+```bash
+export RESOURCE_GROUP="${RESOURCE_GROUP:-rg-ai-workspace-sandbox-lab}"
+export PYTHON_POOL_NAME="${PYTHON_POOL_NAME:-ai-workspace-python-sbx}"
+az group show --name "$RESOURCE_GROUP" \
+  --query '{name:name,location:location,id:id}' --output table
+```
+
+수동 경로에서 만든 Session만 즉시 삭제:
 
 ```bash
 curl --fail-with-body --silent --show-error \
   --request DELETE \
-  "$PYTHON_ENDPOINT/session?api-version=2025-02-02-preview&identifier=$PYTHON_SESSION_ID" \
+  "$PYTHON_ENDPOINT/session?api-version=$SESSION_API_VERSION&identifier=$PYTHON_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN" \
   --output /dev/null \
   --write-out 'delete session HTTP %{http_code}\n'
@@ -765,7 +951,7 @@ az group delete \
   --no-wait
 ```
 
-## 17. 실제 검증 기록
+## 18. 참고: 실제 검증 기록
 
 2026-07-24 한국 중부 리전:
 
@@ -803,119 +989,3 @@ az group delete \
 | §13.2 오류 재실행 | `Failed`(`KeyError: 'sales_amount'`) → `Succeeded`(`total: 680.0`) |
 | §14 session 조회 | `identifier`, `createdAt`, `lastAccessedAt`, `expireAt`, `etag` |
 | §14.1 정리 | 업로드 200 → 삭제 204 → 목록 `{"value":[]}` → 다운로드 404 |
-
-## 18. LLM Agent backend 구성
-
-Python pool 검증이 끝났으면 사용자가 자연어로 요청할 수 있도록 Agent backend와 실제 LLM을 연결한다. 사용자는 이 설정과 credential을 보지 않는다.
-
-### 18.1 구성 요소
-
-| 구성 요소 | 관리자 책임 |
-| --- | --- |
-| `agent/policy.py` | 위험 요청을 LLM과 session 할당 전에 분류 |
-| `agent/broker.py` | token, endpoint와 identifier를 backend에서 관리 |
-| `agent/llm.py` | 실제 모델 호출과 생성 코드 수신 |
-| `agent/staging.py` | 파일 형식, macro, 경로와 hash 검사 |
-| `agent/orchestrator.py` | 생성·실행·재시도·삭제·승인 흐름 연결 |
-
-먼저 실제 모델 없이 통제 장치를 검증한다.
-
-```bash
-python3 -m unittest discover -s tests -v
-LLM_PROVIDER=stub bash scripts/agent-lab.sh
-```
-
-### 18.2 Foundry(Azure OpenAI) 모델 배포
-
-기존 배포가 있으면 이 절을 건너뛴다. 실습용 배포는 가용 쿼타 전량이 아니라 작은 capacity부터 시작한다.
-
-먼저 해당 모델의 가용 쿼타와 기존 배포를 확인한다.
-
-```bash
-export LLM_LOCATION="koreacentral"
-export LLM_MODEL="gpt-5.6-terra"
-
-az cognitiveservices usage list \
-  --location "$LLM_LOCATION" \
-  --query "[?name.value=='OpenAI.GlobalStandard.$LLM_MODEL'].{limit:limit,used:currentValue}" \
-  --output table
-
-az cognitiveservices account list --query '[].{name:name,rg:resourceGroup}' --output tsv \
-| while read -r NAME GROUP; do
-    az cognitiveservices account deployment list \
-      --name "$NAME" \
-      --resource-group "$GROUP" \
-      --query "[?properties.model.name=='$LLM_MODEL'].{account:'$NAME',rg:'$GROUP',deployment:name,capacity:sku.capacity}" \
-      --output tsv 2>/dev/null
-  done
-```
-
-가용량이 10K TPM보다 적으면 새 배포를 만들지 않는다. 접근 권한이 있는 기존 배포를 재사용하거나 quota 증설 후 진행한다.
-
-```bash
-export LLM_RESOURCE_GROUP="rg-ai-workspace-sandbox-lab"
-export LLM_ACCOUNT="<GLOBALLY_UNIQUE_NAME>"
-
-az cognitiveservices account create \
-  --name "$LLM_ACCOUNT" \
-  --resource-group "$LLM_RESOURCE_GROUP" \
-  --kind AIServices \
-  --sku S0 \
-  --location "$LLM_LOCATION" \
-  --custom-domain "$LLM_ACCOUNT" \
-  --assign-identity \
-  --yes \
-  --output none
-
-az cognitiveservices account deployment create \
-  --name "$LLM_ACCOUNT" \
-  --resource-group "$LLM_RESOURCE_GROUP" \
-  --deployment-name "$LLM_MODEL" \
-  --model-name "$LLM_MODEL" \
-  --model-version 2026-07-09 \
-  --model-format OpenAI \
-  --sku-name GlobalStandard \
-  --sku-capacity 10 \
-  --output none
-```
-
-`sku-capacity 10`은 10K TPM이다. 배포가 실패하면 해당 모델·SKU의 subscription quota와 기존 배포 사용량을 먼저 확인한다.
-
-### 18.3 추론 RBAC와 backend 환경
-
-```bash
-export LLM_ACCOUNT_ID=$(az cognitiveservices account show \
-  --name "$LLM_ACCOUNT" \
-  --resource-group "$LLM_RESOURCE_GROUP" \
-  --query id \
-  --output tsv)
-
-az role assignment create \
-  --role "Cognitive Services OpenAI User" \
-  --assignee-object-id "$(az ad signed-in-user show --query id --output tsv)" \
-  --assignee-principal-type User \
-  --scope "$LLM_ACCOUNT_ID"
-
-export LLM_PROVIDER="azure-openai"
-export AZURE_OPENAI_ENDPOINT="https://$LLM_ACCOUNT.openai.azure.com"
-export AZURE_OPENAI_DEPLOYMENT="$LLM_MODEL"
-export REASONING_EFFORT="medium"
-```
-
-Production에서는 로그인한 사용자가 아니라 Agent backend의 Managed Identity에 두 역할을 부여한다.
-
-- Python pool 범위: `Azure ContainerApps Session Executor`
-- Azure OpenAI account 범위: `Cognitive Services OpenAI User`
-
-구성이 끝나면 [실습 1B](01B_Python_Code_Interpreter_User_Lab.md)에서 실제 LLM의 자연어 요청, 코드 생성, 실행과 승인을 검증한다.
-
-### 18.4 관리자 확인 사항
-
-- 정책 엔진이 LLM 호출보다 먼저 실행됨
-- 생성 코드가 실행 전에 검사됨
-- 성공 판정은 `stderr`가 아니라 platform `status`를 사용함
-- 필수 산출물 이름을 LLM에 전달하고 누락 시 재시도 또는 실패 처리함
-- 재시도 횟수와 실행 timeout이 제한됨
-- session identifier와 token이 사용자 응답에 없음
-- 성공·실패와 관계없이 session이 삭제됨
-- 승인하지 않은 artifact는 staging 밖으로 이동하지 않음

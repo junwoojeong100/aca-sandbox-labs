@@ -7,8 +7,8 @@ AI Workspace가 사용자의 자연어 요청과 첨부파일을 받아 코드�
 | 문서 | 주 대상 | 용도 |
 | --- | --- | --- |
 | [AI Workspace 권장 아키텍처](docs/AI_Workspace_Dynamic_Sessions_Reference_Architecture.md) | 관리자·아키텍트 | Azure 권장 구조, 보안·격리, 세션·리소스·비용 운영, 모니터링, 제약사항, 대안 비교, 도입 단계 |
-| [실습 1: Python Code Interpreter와 LLM](labs/01_Python_Code_Interpreter_Lab.md) | 관리자·사용자 | 관리자용 Pool·LLM backend 구성과 사용자용 자연어 코드 생성·실행·승인 |
-| [실습 2: Office Custom Container](labs/02_Office_Custom_Container_Lab.md) | 관리자·사용자 | 관리자용 인프라 구성과 사용자용 DOCX/PDF/PPTX/XLSX 생성·변환·편집 |
+| [실습 1: Python Code Interpreter와 LLM](labs/01_Python_Code_Interpreter_Lab.md) | 관리자·실습 운영자 | 관리자용 Pool·LLM backend 구성과 사용자 API 기반 자연어 코드 생성·실행·승인 검증 |
+| [실습 2: Office Custom Container](labs/02_Office_Custom_Container_Lab.md) | 관리자·실습 운영자 | 관리자용 인프라 구성과 사용자 API 기반 DOCX/PDF/PPTX/XLSX 생성·변환·편집 검증 |
 | [Agent 오케스트레이션 소스](agent/) | 관리자·개발자 | 정책 엔진, Session Broker, LLM client, Artifact Staging, Approval Service |
 | [Python 사용자 Gateway](python_gateway/) | 관리자·개발자 | 자연어·첨부파일 analysis job, 결과 다운로드와 동일 artifact 승인 API 제공 |
 | [Office 이미지 소스](office-container/) | 관리자·개발자 | LibreOffice, Pandoc, Poppler를 포함한 비루트 HTTP 생성·변환·편집 서비스 |
@@ -16,9 +16,58 @@ AI Workspace가 사용자의 자연어 요청과 첨부파일을 받아 코드�
 | [자동 실행 스크립트](scripts/) | 관리자 | 사전 조건 검사, Python·Office·Agent 배포 및 검증, 명시적 전체 정리 |
 | [Offline 테스트](tests/) | 관리자·개발자 | Azure 없이 정책·검사·승인 게이트 검증 |
 
+## 처음이라면 이 순서로 진행
+
+처음 수행하는 사람은 여러 경로를 섞지 말고 다음 순서만 따른다.
+
+1. [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli), Bash, `curl`, `jq`, Python 3를 준비하고 `az login`을 실행한다.
+2. 아래 **Python Sandbox만 확인** Fast Path를 실행한다.
+3. 자연어 요청까지 확인하려면 [실습 1A §16](labs/01A_Python_Code_Interpreter_Admin_Lab.md#16-llm-agent-backend-구성)에서 모델을 연결한다.
+4. [실습 1B](labs/01B_Python_Code_Interpreter_User_Lab.md)를 따라 사용자 API 흐름을 검증한다.
+5. Office PDF 변환이나 고정된 문서 도구가 필요할 때만 실습 2를 추가한다.
+6. 마지막에 사용한 Resource Group 이름을 확인하고 [Python 실습 정리](labs/01A_Python_Code_Interpreter_Admin_Lab.md#17-정리) 또는 [Office 실습 정리](labs/02A_Office_Custom_Container_Admin_Lab.md#17-정리)를 수행한다.
+
+> 실습 1B와 2B의 “사용자”는 실제 최종 사용자가 아니라 **사용자 경험을 REST API로 검증하는 실습 운영자·개발자**를 뜻한다. 실제 사용자는 terminal이나 `curl`을 사용하지 않고 AI Workspace UI에서 요청·미리보기·승인만 수행한다.
+>
+> 로컬 도구 설치가 부담되면 Azure Portal의 **Cloud Shell - Bash**를 사용한다. Repository를 clone한 뒤 같은 명령을 실행할 수 있다.
+
+자주 쓰는 용어:
+
+| 용어 | 이 문서에서의 의미 |
+| --- | --- |
+| pool | 격리 session을 할당하는 Azure 리소스 |
+| session | 한 요청이나 대화에 할당되는 임시 실행 환경 |
+| identifier | backend만 보관하는 session 식별자 |
+| staging | 검사와 승인 전 결과 파일을 두는 임시 저장 위치 |
+| 승격 | 승인된 결과만 최종 업무 저장소로 복사하는 과정 |
+
+## Azure 사전 점검 빠른 판단표
+
+자동 실습 전에 `bash scripts/check-prereqs.sh`를 실행하고 다음 기준으로 대응한다.
+
+| 확인 결과 | 의미 | 조치 |
+| --- | --- | --- |
+| Resource 생성 권한 오류 | 현재 identity에 배포 권한이 없음 | 대상 Resource Group 또는 subscription에 `Contributor` 요청 |
+| Role assignment 권한 오류 | `Contributor`만으로는 역할을 부여할 수 없음 | `Owner` 또는 `User Access Administrator` 요청. 관리자가 Session Executor 역할을 대신 부여해도 됨 |
+| Session pool quota `available=0` | 해당 subscription·region에서 새 pool 생성 불가 | Portal **My quotas**에서 Provider를 **Azure Container Apps**로 선택해 regional `Session pools` 증가 요청 |
+| Managed environment quota `available=0` | Office용 Environment를 새로 만들 수 없음 | 같은 Portal에서 `Managed Environment Count` 증가 요청 또는 기존 Environment 재사용 |
+| 지역 미지원 오류 | 선택한 `LOCATION`에서 Dynamic Sessions 사용 불가 | [지원 리전](https://learn.microsoft.com/azure/container-apps/sessions#supported-regions) 중 quota가 있는 리전 선택 |
+| Data plane HTTP 403 | Session Executor가 없거나 아직 전파되지 않음 | pool scope 역할 확인 → 30~60초 대기 → token 재발급 |
+| `SessionRequestValidationFailed` | endpoint, method, query 또는 API version 불일치 | 응답의 `error.code`, `message`, `target`, `traceId`를 확인하고 공식 API 문서와 비교 |
+
+이 실습에서 확인하는 `Session pools`와 `Managed Environment Count` quota는 region 단위이고 Portal에서 증가를 요청한다. 요청은 즉시 승인되기도 하지만 검토가 필요하면 며칠 걸릴 수 있으므로 실습 직전에 처음 확인하지 않는다.
+
+이 repository의 Preview API 기본값은 `PYTHON_API_VERSION=2025-10-02-preview`, `SESSION_API_VERSION=2025-02-02-preview`다. 검증된 기본값을 우선 사용하고, 공식 문서에서 변경을 확인한 경우에만 환경 변수로 재정의한다.
+
 ## 가장 빠른 시작
 
-모든 명령은 repository root에서 실행한다. 자동 스크립트는 현재 `az` subscription과 기본 리전 `koreacentral`을 사용하며, `SUBSCRIPTION_ID`, `RESOURCE_GROUP`, `LOCATION` 같은 환경 변수로 재정의할 수 있다.
+이 절의 명령은 repository root에서 실행한다. 역할별 수동 가이드는 중간에 `.work/` 디렉터리로 이동하므로, 각 코드 블록 바로 앞의 현재 위치 안내를 따른다. 자동 스크립트는 현재 `az` subscription과 기본 리전 `koreacentral`을 사용하며, `SUBSCRIPTION_ID`, `RESOURCE_GROUP`, `LOCATION` 같은 환경 변수로 재정의할 수 있다.
+
+현재 선택된 subscription을 먼저 확인한다.
+
+```bash
+az account show --query '{name:name,id:id,user:user.name}' --output table
+```
 
 ### Python Sandbox만 확인
 
@@ -27,7 +76,7 @@ bash scripts/check-prereqs.sh
 bash scripts/python-lab.sh
 ```
 
-### 자연어 요청부터 승인까지 확인
+### 자연어 요청부터 승인까지 자동 검증
 
 실습 2의 Office pool은 필요 없다.
 
@@ -37,7 +86,9 @@ bash scripts/python-lab.sh
 bash scripts/agent-lab.sh
 ```
 
-### Office 생성·변환·편집만 확인
+위 명령은 backend 정책·재시도·승인 게이트를 자동 검증한다. 실제 사용자 REST API와 `curl` 흐름은 [실습 1B](labs/01B_Python_Code_Interpreter_User_Lab.md)의 Gateway 실행부터 진행한다.
+
+### Office 생성·변환·편집 자동 검증
 
 Python pool은 필요 없다. Custom Container ready session과 관련 리소스에 비용이 발생하므로 정리 절차까지 확인한다.
 
@@ -46,7 +97,9 @@ bash scripts/check-prereqs.sh
 bash scripts/office-lab.sh
 ```
 
-### 전체 경로 확인
+실제 사용자 REST API와 `curl` 흐름은 [실습 2B](labs/02B_Office_Custom_Container_User_Lab.md)의 Gateway 실행부터 진행한다.
+
+### 전체 backend 자동 검증
 
 ```bash
 bash scripts/check-prereqs.sh
@@ -54,6 +107,8 @@ bash scripts/python-lab.sh
 bash scripts/office-lab.sh
 bash scripts/agent-lab.sh
 ```
+
+이 명령 묶음은 두 pool과 Agent backend를 자동 검증한다. 사용자 REST 흐름은 이어서 실습 1B와 2B의 Gateway·`curl` 절을 각각 수행한다.
 
 `check-prereqs.sh`는 로컬 도구, Azure CLI 버전과 로그인만 확인한다. quota와 RBAC 권한은 각 실습 스크립트가 조회하거나 실제 리소스·역할 생성 과정에서 검증한다. 자동 실행이 기본 경로이며, 세부 명령과 문제 해결이 필요할 때 역할별 [실습 1](labs/01_Python_Code_Interpreter_Lab.md)과 [실습 2](labs/02_Office_Custom_Container_Lab.md)를 참고한다.
 
@@ -72,16 +127,16 @@ Azure Portal에서는 pool 구성, provisioning 상태, metrics와 logs를 확�
 
 | 고객 요건 | 검증 위치 |
 | --- | --- |
-| 자연어 요청에 따른 Python 코드 생성·실행과 결과 반환 | 실습 1B §3 |
-| 실행 오류 분석, 제한된 코드 수정과 재실행 | 실습 1A §13.2, 실습 1B §5 |
-| 데이터 분석, 계산, 차트 및 결과 파일 생성 | 실습 1A §9~12, 실습 1B §3 |
-| 첨부파일을 사용한 분석·가공 | 실습 1A §10, 실습 1B §2~3 |
-| DOCX, XLSX, PPTX, PDF 생성 | 실습 1A §8.1, 실습 2B §2 |
-| Office 문서 변환과 편집 | 실습 2B §3~4 |
+| 자연어 요청에 따른 Python 코드 생성·실행과 결과 반환 | 실습 1B §4 |
+| 실행 오류 분석, 제한된 코드 수정과 재실행 | 실습 1A §13.2, 실습 1B §6 |
+| 데이터 분석, 계산, 차트 및 결과 파일 생성 | 실습 1A §9~12, 실습 1B §4 |
+| 첨부파일을 사용한 분석·가공 | 실습 1A §10, 실습 1B §3~4 |
+| DOCX, XLSX, PPTX, PDF 생성 | 실습 1A §8.1, 실습 2B §3 |
+| Office 문서 변환과 편집 | 실습 2B §4~5 |
 | 사용자 또는 요청 단위의 독립 세션과 임시 파일 공간 | 실습 1A §13.1 |
-| 실행 시간, 메모리, 네트워크, 허용 명령어 제한 | 실습 1A §13, §13.3, 실습 1B §5 |
+| 실행 시간, 메모리, 네트워크, 허용 명령어 제한 | 실습 1A §13, §13.3, 실습 1B §6 |
 | 작업 완료 또는 session 종료 시 환경과 파일 자동 정리 | 실습 1A §14.1 |
-| 검사, 미리보기, Diff와 사용자 승인 후 실제 업무 시스템 반영 | 실습 1B §4, 실습 2B §5 |
+| 검사, 미리보기, Diff와 사용자 승인 후 실제 업무 시스템 반영 | 실습 1B §5, 실습 2B §6 |
 
 ## 권장 기준선
 
@@ -171,7 +226,29 @@ AI Workspace 사용자
 | 결과 정확성 | 월별 합계 200/240/240, 총합 680.0 일치 |
 | 필수 산출물 이름 | `monthly_sales.png`, `summary.json` 생성과 승인 승격 확인 |
 
-> 실제 모델 검증에서 **stub으로는 재현되지 않는 버그를 발견해 고쳤다.** matplotlib·pandas 경고가 `stderr`로 출력되면서, `status`가 `Succeeded`인데도 성공한 코드를 실패로 판정해 재시도 한도를 소진했다. 성공 판정은 `stderr`가 아니라 `status`로만 해야 한다. 관리자 확인 사항은 [실습 1A §18.4](labs/01A_Python_Code_Interpreter_Admin_Lab.md#184-관리자-확인-사항)에 있다.
+### 2026-07-25 재배포 재검증
+
+| 항목 | 결과 |
+| --- | --- |
+| Python pool | 기존 pool 재사용, 분석·egress 차단·격리·오류 수정·session 정리 통과 |
+| Office pool | image `office-sandbox:20260725120350` 재빌드·업데이트, 생성·변환·편집·로그·metric 통과 |
+| 실제 LLM | 기존 `gpt-5.6-terra` 배포와 Entra RBAC를 재사용해 자연어 실행·승인 통과 |
+| Python 사용자 Gateway | create·download·approve·delete 전체 REST 흐름 통과 |
+| Office 사용자 Gateway | create·download·convert·edit·approve·delete 전체 REST 흐름 통과 |
+| Live RBAC | 두 pool의 Session Executor와 ACR의 AcrPull 확인 |
+| Regional quota | Managed Environment 48개, Session pool 48개 추가 사용 가능 |
+
+재검증에서 실제 모델의 정상적인 출력 변동도 확인했다.
+
+- `summary.json.monthly_sales`가 object 또는 `{month, sales}` array로 생성될 수 있어 값 기준 검증으로 변경했다.
+- 실제 모델은 정상 요청도 코드 오류를 한 번 수정해 2회차에 성공할 수 있으므로 재시도 한도 내 성공을 정상으로 판단한다.
+- 재시도 한도 자체의 결정론적 검증은 `LLM_PROVIDER=stub`으로 분리했다.
+- 기존 RBAC가 있으면 재사용하고, 없을 때만 생성한다.
+- 자동 스크립트는 성공·실패와 관계없이 검증용 session을 즉시 delete/stop한다.
+
+> 위 capacity 250은 당시 가용 쿼타를 실측하기 위한 과거 검증 기록이며 권장 설정이 아니다. 현재 관리자 가이드는 기존 배포를 우선 재사용하고, 새 실습 배포는 10K TPM처럼 작은 capacity부터 시작한다.
+
+> 실제 모델 검증에서 **stub으로는 재현되지 않는 버그를 발견해 고쳤다.** matplotlib·pandas 경고가 `stderr`로 출력되면서, `status`가 `Succeeded`인데도 성공한 코드를 실패로 판정해 재시도 한도를 소진했다. 성공 판정은 `stderr`가 아니라 `status`로만 해야 한다. 관리자 확인 사항은 [실습 1A §16.4](labs/01A_Python_Code_Interpreter_Admin_Lab.md#164-관리자-확인-사항)에 있다.
 
 > 역할별 가이드 재검증에서는 LLM이 `summary.json` 대신 `monthly_sales_summary.json`을 만들어도 실행 `status`만 보고 성공으로 반환하는 결함을 발견했다. 필수 산출물 이름을 prompt에 명시하고, 실행 후 누락된 파일이 있으면 제한 횟수 안에서 다시 생성하도록 수정했다.
 
@@ -192,4 +269,10 @@ python3 -m unittest discover -s tests -v
 bash scripts/validate-repo.sh
 ```
 
-자동 스크립트는 기본적으로 리소스를 삭제하지 않는다. `cleanup.sh`는 기본 Resource Group 전체를 삭제하므로 대상 이름을 확인한 뒤 `CONFIRM_DELETE=yes bash scripts/cleanup.sh`처럼 명시적으로 실행한다.
+자동 스크립트는 검증용 임시 session만 즉시 delete/stop하고 pool과 Azure 리소스는 삭제하지 않는다. `cleanup.sh`는 Resource Group 전체를 삭제하므로 대상 이름을 확인한 뒤 실행한다.
+
+```bash
+RESOURCE_GROUP="rg-ai-workspace-sandbox-lab" \
+CONFIRM_DELETE=yes \
+bash scripts/cleanup.sh
+```

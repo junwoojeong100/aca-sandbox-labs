@@ -15,6 +15,8 @@
 
 예상 시간은 20~30분이다.
 
+> 이 문서는 최종 사용자가 아니라 **사용자 경험을 REST API로 검증하는 실습 운영자·개발자**가 수행한다. 실제 사용자는 terminal, Azure resource, token 또는 session identifier를 다루지 않는다.
+
 ## 1. 사전 조건
 
 관리자가 [실습 2A](02A_Office_Custom_Container_Admin_Lab.md)를 완료해 다음을 준비해야 한다.
@@ -24,6 +26,8 @@
 - Startup·Liveness probe와 `EgressDisabled`
 - 사용자 대신 token과 session identifier를 관리하는 backend
 - `/health`가 노출하는 허용 operation 계약
+- repository root에서 실행할 수 있는 Bash, `curl`, `jq`, `file`, Python 3
+- Terminal A에서 `az account show`가 성공하는 Azure CLI 로그인
 
 이 repository의 `office_gateway/`가 AI Workspace backend를 대리한다. Gateway만 Azure token, pool endpoint와 session identifier를 관리하며 사용자 API에는 public document job ID만 반환한다.
 
@@ -31,7 +35,9 @@
 
 ## 2. 사용자 Gateway 실행
 
-다음 명령은 관리자 또는 실습 운영자가 repository root에서 실행한다.
+두 terminal을 사용한다. 환경 변수는 terminal 간에 자동으로 공유되지 않으므로 각 블록을 지정된 terminal에서 실행한다.
+
+**Terminal A - Gateway:** 관리자 또는 실습 운영자가 repository root에서 실행한다.
 
 ```bash
 export RESOURCE_GROUP="rg-ai-workspace-sandbox-lab"
@@ -41,9 +47,11 @@ python3 -m office_gateway.server
 
 Gateway는 기본적으로 `http://127.0.0.1:8090`에서 실행된다. Azure token과 session identifier는 이 프로세스 안에서만 사용한다.
 
-다른 terminal에서 사용자 API 변수를 설정하고 health를 확인한다.
+**Terminal B - 사용자 API:** 새 terminal을 열고 repository root로 이동한 뒤 작업 디렉터리와 사용자 API 변수를 설정한다.
 
 ```bash
+mkdir -p .work/office-user
+
 export OFFICE_USER_API="http://127.0.0.1:8090"
 export DEMO_USER="user-demo"
 
@@ -64,6 +72,10 @@ curl --fail-with-body --silent --show-error \
 
 backend는 이를 임의 shell이 아니라 다음과 같은 선언적 요청으로 변환한다.
 
+현재 reference Office Gateway는 자연어를 직접 해석하지 않고 아래의 구조화된 `title`·`content` 요청을 받는다. Production AI Workspace에서는 앞단의 Agent가 자연어 요청을 이 schema로 변환한다.
+
+Reference Gateway는 생성·변환·편집 요청을 동기식으로 처리하므로 container 작업이 끝날 때까지 `curl`이 대기한다.
+
 ```bash
 curl --fail-with-body --silent --show-error \
   --request POST \
@@ -74,10 +86,10 @@ curl --fail-with-body --silent --show-error \
     "title": "2026년 분기 보고서",
     "content": "매출 요약\n\n검토 전 문서"
   }' \
-  --output .work/office-user-create.json
+  --output .work/office-user/create.json
 
-cat .work/office-user-create.json | jq
-export DOCUMENT_JOB_ID=$(jq -r '.id' .work/office-user-create.json)
+jq . .work/office-user/create.json
+export DOCUMENT_JOB_ID=$(jq -r '.id' .work/office-user/create.json)
 ```
 
 통과 기준:
@@ -101,9 +113,9 @@ curl --fail-with-body --silent --show-error \
 curl --fail-with-body --silent --show-error \
   "$OFFICE_USER_API/api/document-jobs/$DOCUMENT_JOB_ID/files/report.pdf" \
   --header "X-Demo-User: $DEMO_USER" \
-  --output .work/office-user-report.pdf
+  --output .work/office-user/report.pdf
 
-file .work/office-user-report.pdf
+file .work/office-user/report.pdf
 ```
 
 ## 4. 변환 요청
@@ -182,8 +194,17 @@ curl --fail-with-body --silent --show-error \
   "$OFFICE_USER_API/api/document-jobs/$DOCUMENT_JOB_ID/approve" \
   --header "X-Demo-User: $DEMO_USER" \
   --header "Content-Type: application/json" \
-  --data '{}' | jq
+  --data '{}' \
+  --output .work/office-user/approved.json
+
+jq '.status, .files' .work/office-user/approved.json
 ```
+
+통과 기준:
+
+- `status`는 `approved`
+- 모든 `files[].approved`는 `true`
+- 승인 응답의 SHA-256은 승인 전 파일 metadata와 일치
 
 ## 7. 사용자 오류 경험
 
@@ -205,5 +226,7 @@ curl --fail-with-body --silent --show-error \
   "$OFFICE_USER_API/api/document-jobs/$DOCUMENT_JOB_ID" \
   --header "X-Demo-User: $DEMO_USER"
 ```
+
+Gateway를 실행한 terminal에서 `Ctrl+C`를 눌러 local reference server를 종료한다.
 
 사용자는 결과 보존 또는 삭제만 요청한다. Pool, ACR·Environment·Log Analytics 정리는 관리자가 [실습 2A §17](02A_Office_Custom_Container_Admin_Lab.md#17-정리)에서 수행한다.

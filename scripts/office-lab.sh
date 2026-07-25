@@ -33,12 +33,26 @@ for provider in \
 done
 
 QUOTA_SCOPE="/subscriptions/$SUBSCRIPTION_ID/providers/Microsoft.App/locations/$LOCATION"
-for resource_name in ManagedEnvironmentCount SessionPools; do
-  az quota show --resource-name "$resource_name" --scope "$QUOTA_SCOPE" \
-    --query '{limit:properties.limit.value}' --output json
-  az quota usage show --resource-name "$resource_name" --scope "$QUOTA_SCOPE" \
-    --query '{usage:properties.usages.value}' --output json
-done
+NEEDS_ENVIRONMENT=0
+NEEDS_SESSION_POOL=0
+az containerapp env show \
+  --name "$CONTAINER_ENV_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --output none 2>/dev/null || NEEDS_ENVIRONMENT=1
+az containerapp sessionpool show \
+  --name "$OFFICE_POOL_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --output none 2>/dev/null || NEEDS_SESSION_POOL=1
+check_regional_quota \
+  ManagedEnvironmentCount \
+  "Container Apps managed environment" \
+  "$QUOTA_SCOPE" \
+  "$NEEDS_ENVIRONMENT"
+check_regional_quota \
+  SessionPools \
+  "Dynamic Sessions pool" \
+  "$QUOTA_SCOPE" \
+  "$NEEDS_SESSION_POOL"
 
 az group create --name "$RESOURCE_GROUP" --location "$LOCATION" \
   --tags purpose=ai-workspace-sandbox-lab --output none
@@ -179,11 +193,12 @@ POOL_ID=$(az containerapp sessionpool show \
   --name "$OFFICE_POOL_NAME" \
   --resource-group "$RESOURCE_GROUP" \
   --query id --output tsv)
-CALLER_OBJECT_ID=$(az ad signed-in-user show --query id --output tsv)
+CALLER_OBJECT_ID=$(get_caller_object_id)
+CALLER_PRINCIPAL_TYPE=${CALLER_PRINCIPAL_TYPE:-User}
 ensure_role_assignment \
   "Azure ContainerApps Session Executor" \
   "$CALLER_OBJECT_ID" \
-  User \
+  "$CALLER_PRINCIPAL_TYPE" \
   "$POOL_ID"
 
 ENDPOINT=$(az containerapp sessionpool show \
@@ -192,6 +207,22 @@ ENDPOINT=$(az containerapp sessionpool show \
   --query properties.poolManagementEndpoint \
   --output tsv)
 SESSION_ID="office-$(python3 -c 'import uuid; print(uuid.uuid4())')"
+
+cleanup_main_session() {
+  local token
+  token=$(az account get-access-token \
+    --resource https://dynamicsessions.io \
+    --query accessToken --output tsv 2>/dev/null) || {
+      log "WARNING: Office validation session token을 얻지 못해 자동 정리를 건너뜁니다."
+      return
+    }
+  curl --silent --show-error --output /dev/null \
+    --request POST \
+    "$ENDPOINT/.management/stopSession?api-version=$SESSION_API_VERSION&identifier=$SESSION_ID" \
+    --header "Authorization: Bearer $token" \
+    || log "WARNING: Office validation session 자동 정리에 실패했습니다: $SESSION_ID"
+}
+trap cleanup_main_session EXIT
 
 http=
 for attempt in $(seq 1 30); do
@@ -368,7 +399,7 @@ http=$(curl --silent --show-error --output /dev/null \
 
 curl --fail-with-body --silent --show-error \
   --request POST \
-  "$ENDPOINT/.management/getSession?api-version=2025-02-02-preview&identifier=$SESSION_ID" \
+  "$ENDPOINT/.management/getSession?api-version=$SESSION_API_VERSION&identifier=$SESSION_ID" \
   --header "Authorization: Bearer $TOKEN" \
   --output "$WORK_DIR/session.json"
 

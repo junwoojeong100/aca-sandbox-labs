@@ -28,5 +28,13 @@ PY
 
 log "Azure CLI: $AZ_CLI_VERSION"
 log "Subscription: $(az account show --query name --output tsv)"
+CALLER_NAME=$(az ad signed-in-user show --query userPrincipalName --output tsv 2>/dev/null || true)
+if [[ -n "$CALLER_NAME" ]]; then
+  log "Signed-in user: $CALLER_NAME"
+else
+  log "Signed-in principal: user lookup unavailable. Service Principal이면 CALLER_OBJECT_ID와 CALLER_PRINCIPAL_TYPE을 설정하세요."
+fi
 log "Local tools, Azure CLI version, and Azure login are valid."
-log "Lab scripts check service quota and required permissions while running."
+log "Resource deployment requires Contributor. Role assignment requires Owner or User Access Administrator."
+log "Lab scripts check regional quota and required permissions while running."
+log "Quota portal: $QUOTA_PORTAL_URL"

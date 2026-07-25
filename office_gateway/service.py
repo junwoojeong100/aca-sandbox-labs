@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from agent import broker, staging
+from agent import broker, config, staging
 
 SAFE_USER = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 SAFE_FILE = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
@@ -163,7 +163,7 @@ class OfficeSessionClient:
         status, _, _ = self._request(
             "POST",
             "/.management/stopSession",
-            query={"api-version": "2025-02-02-preview"},
+            query={"api-version": config.SESSION_API_VERSION},
         )
         if status not in (200, 202, 204, 404):
             raise GatewayError(status, "Office session을 종료하지 못했다")

@@ -48,19 +48,55 @@ python3 -m unittest discover -s tests >/dev/null
 python3 <<'PY'
 import pathlib
 import re
+import urllib.parse
 
 root = pathlib.Path(".").resolve()
 missing = []
+missing_anchors = []
+
+
+def github_slug(heading):
+    heading = re.sub(r"<[^>]+>", "", heading)
+    heading = re.sub(r"[`*_~]", "", heading).strip().lower()
+    heading = re.sub(r"[^\w\-\s\u0080-\uffff]", "", heading)
+    return re.sub(r"\s+", "-", heading)
+
+
+anchors = {}
+for document in root.rglob("*.md"):
+    counts = {}
+    document_anchors = set()
+    for line in document.read_text(encoding="utf-8").splitlines():
+        match = re.match(r"^#{1,6}\s+(.+?)\s*#*$", line)
+        if not match:
+            continue
+        base = github_slug(match.group(1))
+        duplicate = counts.get(base, 0)
+        counts[base] = duplicate + 1
+        document_anchors.add(base if duplicate == 0 else f"{base}-{duplicate}")
+    anchors[document.resolve()] = document_anchors
+
 for document in root.rglob("*.md"):
     text = document.read_text(encoding="utf-8")
     for target in re.findall(r"\[[^\]]+\]\(([^)]+)\)", text):
-        if target.startswith(("http://", "https://", "#", "mailto:")):
+        if target.startswith(("http://", "https://", "mailto:")):
             continue
-        relative_path = target.split("#", 1)[0]
-        if relative_path and not (document.parent / relative_path).resolve().exists():
+        relative_path, separator, fragment = target.partition("#")
+        target_document = (
+            (document.parent / relative_path).resolve()
+            if relative_path
+            else document.resolve()
+        )
+        if relative_path and not target_document.exists():
             missing.append(f"{document.relative_to(root)} -> {target}")
+            continue
+        decoded_fragment = urllib.parse.unquote(fragment)
+        if separator and decoded_fragment not in anchors.get(target_document, set()):
+            missing_anchors.append(f"{document.relative_to(root)} -> {target}")
 if missing:
     raise SystemExit("Missing local links:\n" + "\n".join(missing))
+if missing_anchors:
+    raise SystemExit("Missing local anchors:\n" + "\n".join(missing_anchors))
 PY
 
 git -C "$REPO_ROOT" diff --check

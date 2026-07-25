@@ -14,8 +14,14 @@ from pathlib import Path
 DYNAMIC_SESSIONS_SCOPE = "https://dynamicsessions.io"
 COGNITIVE_SERVICES_SCOPE = "https://cognitiveservices.azure.com"
 
-PYTHON_API_VERSION = "2025-10-02-preview"
-SESSION_API_VERSION = "2025-02-02-preview"
+PYTHON_API_VERSION = (
+    os.environ.get("PYTHON_API_VERSION", "2025-10-02-preview").strip()
+    or "2025-10-02-preview"
+)
+SESSION_API_VERSION = (
+    os.environ.get("SESSION_API_VERSION", "2025-02-02-preview").strip()
+    or "2025-02-02-preview"
+)
 
 
 class ConfigError(RuntimeError):

@@ -19,10 +19,16 @@ az provider register --namespace Microsoft.App --wait
 az provider register --namespace Microsoft.Quota --wait
 
 QUOTA_SCOPE="/subscriptions/$SUBSCRIPTION_ID/providers/Microsoft.App/locations/$LOCATION"
-az quota show --resource-name SessionPools --scope "$QUOTA_SCOPE" \
-  --query '{limit:properties.limit.value}' --output json
-az quota usage show --resource-name SessionPools --scope "$QUOTA_SCOPE" \
-  --query '{usage:properties.usages.value}' --output json
+NEEDS_SESSION_POOL=0
+az containerapp sessionpool show \
+  --name "$PYTHON_POOL_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --output none 2>/dev/null || NEEDS_SESSION_POOL=1
+check_regional_quota \
+  SessionPools \
+  "Dynamic Sessions pool" \
+  "$QUOTA_SCOPE" \
+  "$NEEDS_SESSION_POOL"
 
 az group create --name "$RESOURCE_GROUP" --location "$LOCATION" \
   --tags purpose=ai-workspace-sandbox-lab --output none
@@ -54,11 +60,12 @@ POOL_ID=$(az containerapp sessionpool show \
   --name "$PYTHON_POOL_NAME" \
   --resource-group "$RESOURCE_GROUP" \
   --query id --output tsv)
-CALLER_OBJECT_ID=$(az ad signed-in-user show --query id --output tsv)
+CALLER_OBJECT_ID=$(get_caller_object_id)
+CALLER_PRINCIPAL_TYPE=${CALLER_PRINCIPAL_TYPE:-User}
 ensure_role_assignment \
   "Azure ContainerApps Session Executor" \
   "$CALLER_OBJECT_ID" \
-  User \
+  "$CALLER_PRINCIPAL_TYPE" \
   "$POOL_ID"
 
 ENDPOINT=$(az containerapp sessionpool show \
@@ -67,6 +74,22 @@ ENDPOINT=$(az containerapp sessionpool show \
   --query properties.poolManagementEndpoint \
   --output tsv)
 SESSION_ID="python-$(python3 -c 'import uuid; print(uuid.uuid4())')"
+
+cleanup_main_session() {
+  local token
+  token=$(az account get-access-token \
+    --resource https://dynamicsessions.io \
+    --query accessToken --output tsv 2>/dev/null) || {
+      log "WARNING: Python validation session token을 얻지 못해 자동 정리를 건너뜁니다."
+      return
+    }
+  curl --silent --show-error --output /dev/null \
+    --request DELETE \
+    "$ENDPOINT/session?api-version=$SESSION_API_VERSION&identifier=$SESSION_ID" \
+    --header "Authorization: Bearer $token" \
+    || log "WARNING: Python validation session 자동 정리에 실패했습니다: $SESSION_ID"
+}
+trap cleanup_main_session EXIT
 
 cat > "$WORK_DIR/sales.csv" <<'CSV'
 month,product,amount
@@ -126,7 +149,7 @@ for attempt in $(seq 1 12); do
     --output "$WORK_DIR/first-execution.json" \
     --write-out '%{http_code}' \
     --request POST \
-    "$ENDPOINT/executions?api-version=2025-10-02-preview&identifier=$SESSION_ID" \
+    "$ENDPOINT/executions?api-version=$PYTHON_API_VERSION&identifier=$SESSION_ID" \
     --header "Authorization: Bearer $TOKEN" \
     --header "Content-Type: application/json" \
     --data '{"codeInputType":"inline","executionType":"synchronous","code":"print(\"Python session ready\")"}')
@@ -146,7 +169,7 @@ for spec in "sales.csv:sales.csv" "analyze_sales.py:analyze_sales.py"; do
   response="$WORK_DIR/upload-$remote_name.json"
   http=$(curl --silent --show-error --output "$response" --write-out '%{http_code}' \
     --request POST \
-    "$ENDPOINT/files?api-version=2025-10-02-preview&identifier=$SESSION_ID" \
+    "$ENDPOINT/files?api-version=$PYTHON_API_VERSION&identifier=$SESSION_ID" \
     --header "Authorization: Bearer $TOKEN" \
     --form "file=@$WORK_DIR/$local_name;filename=$remote_name")
   expect_2xx "$http" "$remote_name upload" "$response"
@@ -155,7 +178,7 @@ done
 response="$WORK_DIR/analysis-execution.json"
 http=$(curl --silent --show-error --output "$response" --write-out '%{http_code}' \
   --request POST \
-  "$ENDPOINT/executions?api-version=2025-10-02-preview&identifier=$SESSION_ID" \
+  "$ENDPOINT/executions?api-version=$PYTHON_API_VERSION&identifier=$SESSION_ID" \
   --header "Authorization: Bearer $TOKEN" \
   --header "Content-Type: application/json" \
   --data '{"codeInputType":"inline","executionType":"synchronous","code":"exec(compile(open(\"/mnt/data/analyze_sales.py\", encoding=\"utf-8\").read(), \"analyze_sales.py\", \"exec\"))"}')
@@ -166,7 +189,7 @@ for file_name in monthly_sales.png summary.json; do
   temporary_file="$WORK_DIR/$file_name.tmp"
   http=$(curl --silent --show-error --output "$temporary_file" \
     --write-out '%{http_code}' \
-    "$ENDPOINT/files/$file_name/content?api-version=2025-10-02-preview&identifier=$SESSION_ID" \
+    "$ENDPOINT/files/$file_name/content?api-version=$PYTHON_API_VERSION&identifier=$SESSION_ID" \
     --header "Authorization: Bearer $TOKEN")
   expect_2xx "$http" "$file_name download" "$temporary_file"
   mv "$temporary_file" "$WORK_DIR/$file_name"
@@ -185,7 +208,7 @@ JSON_HASH=$(sha256_file "$WORK_DIR/summary.json")
 response="$WORK_DIR/egress-validation.json"
 http=$(curl --silent --show-error --output "$response" --write-out '%{http_code}' \
   --request POST \
-  "$ENDPOINT/executions?api-version=2025-10-02-preview&identifier=$SESSION_ID" \
+  "$ENDPOINT/executions?api-version=$PYTHON_API_VERSION&identifier=$SESSION_ID" \
   --header "Authorization: Bearer $TOKEN" \
   --header "Content-Type: application/json" \
   --data '{"codeInputType":"inline","executionType":"synchronous","code":"import urllib.request\ntry:\n    urllib.request.urlopen(\"https://example.com\", timeout=5)\n    print(\"UNEXPECTED_EGRESS_ALLOWED\")\nexcept Exception as exc:\n    print(\"EGRESS_BLOCKED\", type(exc).__name__)"}')
@@ -197,7 +220,7 @@ jq -e '
 ' "$response" >/dev/null
 
 curl --fail-with-body --silent --show-error \
-  "$ENDPOINT/session?api-version=2025-02-02-preview&identifier=$SESSION_ID" \
+  "$ENDPOINT/session?api-version=$SESSION_API_VERSION&identifier=$SESSION_ID" \
   --header "Authorization: Bearer $TOKEN" \
   --output "$WORK_DIR/session.json"
 
@@ -205,7 +228,7 @@ curl --fail-with-body --silent --show-error \
 response="$WORK_DIR/preinstalled.json"
 http=$(curl --silent --show-error --output "$response" --write-out '%{http_code}' \
   --request POST \
-  "$ENDPOINT/executions?api-version=2025-10-02-preview&identifier=$SESSION_ID" \
+  "$ENDPOINT/executions?api-version=$PYTHON_API_VERSION&identifier=$SESSION_ID" \
   --header "Authorization: Bearer $TOKEN" \
   --header "Content-Type: application/json" \
   --data '{"codeInputType":"inline","executionType":"synchronous","code":"import importlib, platform\nprint(\"python\", platform.python_version())\nfor name in [\"pandas\",\"numpy\",\"matplotlib\",\"scipy\",\"sklearn\",\"openpyxl\",\"docx\",\"pptx\",\"reportlab\"]:\n    try:\n        module = importlib.import_module(name)\n        print(name, getattr(module, \"__version__\", \"unknown\"))\n    except ImportError:\n        print(name, \"MISSING\")"}')
@@ -219,28 +242,28 @@ jq -e '
 SECOND_SESSION_ID="python-$(python3 -c 'import uuid; print(uuid.uuid4())')"
 response="$WORK_DIR/isolation-list.json"
 http=$(curl --silent --show-error --output "$response" --write-out '%{http_code}' \
-  "$ENDPOINT/files?api-version=2025-10-02-preview&identifier=$SECOND_SESSION_ID" \
+  "$ENDPOINT/files?api-version=$PYTHON_API_VERSION&identifier=$SECOND_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN")
 expect_2xx "$http" "Second session file list" "$response"
 jq -e '(.value | length) == 0' "$response" >/dev/null \
   || die "Session isolation failed: second session can see files"
 
 http=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
-  "$ENDPOINT/files/sales.csv/content?api-version=2025-10-02-preview&identifier=$SECOND_SESSION_ID" \
+  "$ENDPOINT/files/sales.csv/content?api-version=$PYTHON_API_VERSION&identifier=$SECOND_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN")
 [[ "$http" == "404" ]] \
   || die "Cross-session download must return 404 but returned $http"
 
 curl --silent --show-error --output /dev/null \
   --request DELETE \
-  "$ENDPOINT/session?api-version=2025-02-02-preview&identifier=$SECOND_SESSION_ID" \
+  "$ENDPOINT/session?api-version=$SESSION_API_VERSION&identifier=$SECOND_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN"
 
 # 오류 -> 코드 수정 -> 재실행 루프.
 response="$WORK_DIR/failed-execution.json"
 http=$(curl --silent --show-error --output "$response" --write-out '%{http_code}' \
   --request POST \
-  "$ENDPOINT/executions?api-version=2025-10-02-preview&identifier=$SESSION_ID" \
+  "$ENDPOINT/executions?api-version=$PYTHON_API_VERSION&identifier=$SESSION_ID" \
   --header "Authorization: Bearer $TOKEN" \
   --header "Content-Type: application/json" \
   --data '{"codeInputType":"inline","executionType":"synchronous","code":"import csv\nwith open(\"/mnt/data/sales.csv\", newline=\"\", encoding=\"utf-8\") as source:\n    print(sum(float(row[\"sales_amount\"]) for row in csv.DictReader(source)))"}')
@@ -254,7 +277,7 @@ jq -e '
 response="$WORK_DIR/fixed-execution.json"
 http=$(curl --silent --show-error --output "$response" --write-out '%{http_code}' \
   --request POST \
-  "$ENDPOINT/executions?api-version=2025-10-02-preview&identifier=$SESSION_ID" \
+  "$ENDPOINT/executions?api-version=$PYTHON_API_VERSION&identifier=$SESSION_ID" \
   --header "Authorization: Bearer $TOKEN" \
   --header "Content-Type: application/json" \
   --data '{"codeInputType":"inline","executionType":"synchronous","code":"import csv\nwith open(\"/mnt/data/sales.csv\", newline=\"\", encoding=\"utf-8\") as source:\n    rows = list(csv.DictReader(source))\nprint(\"total:\", sum(float(row[\"amount\"]) for row in rows))"}')
@@ -271,7 +294,7 @@ if [[ "${RUN_LIMIT_TESTS:-no}" == "yes" ]]; then
   http=$(curl --silent --show-error --output "$response" --write-out '%{http_code}' \
     --max-time 600 \
     --request POST \
-    "$ENDPOINT/executions?api-version=2025-10-02-preview&identifier=$SESSION_ID" \
+    "$ENDPOINT/executions?api-version=$PYTHON_API_VERSION&identifier=$SESSION_ID" \
     --header "Authorization: Bearer $TOKEN" \
     --header "Content-Type: application/json" \
     --data '{"codeInputType":"inline","executionType":"synchronous","code":"import time\nfor _ in range(300):\n    time.sleep(1)\nprint(\"NO_TIMEOUT\")"}')
@@ -286,7 +309,7 @@ if [[ "${RUN_LIMIT_TESTS:-no}" == "yes" ]]; then
   http=$(curl --silent --show-error --output "$response" --write-out '%{http_code}' \
     --max-time 600 \
     --request POST \
-    "$ENDPOINT/executions?api-version=2025-10-02-preview&identifier=$SESSION_ID" \
+    "$ENDPOINT/executions?api-version=$PYTHON_API_VERSION&identifier=$SESSION_ID" \
     --header "Authorization: Bearer $TOKEN" \
     --header "Content-Type: application/json" \
     --data '{"codeInputType":"inline","executionType":"synchronous","code":"blocks = []\nwhile True:\n    blocks.append(bytearray(100 * 1024 * 1024))"}')
@@ -304,33 +327,33 @@ CLEANUP_SESSION_ID="python-$(python3 -c 'import uuid; print(uuid.uuid4())')"
 printf 'a,b\n1,2\n' > "$WORK_DIR/cleanup-probe.csv"
 http=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
   --request POST \
-  "$ENDPOINT/files?api-version=2025-10-02-preview&identifier=$CLEANUP_SESSION_ID" \
+  "$ENDPOINT/files?api-version=$PYTHON_API_VERSION&identifier=$CLEANUP_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN" \
   --form "file=@$WORK_DIR/cleanup-probe.csv;filename=cleanup-probe.csv")
 expect_2xx "$http" "Cleanup probe upload" /dev/null
 
 response="$WORK_DIR/before-cleanup.json"
 curl --silent --show-error --output "$response" \
-  "$ENDPOINT/files?api-version=2025-10-02-preview&identifier=$CLEANUP_SESSION_ID" \
+  "$ENDPOINT/files?api-version=$PYTHON_API_VERSION&identifier=$CLEANUP_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN"
 jq -e '(.value | length) == 1' "$response" >/dev/null \
   || die "Cleanup probe file was not uploaded"
 
 http=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
   --request DELETE \
-  "$ENDPOINT/session?api-version=2025-02-02-preview&identifier=$CLEANUP_SESSION_ID" \
+  "$ENDPOINT/session?api-version=$SESSION_API_VERSION&identifier=$CLEANUP_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN")
 expect_2xx "$http" "Delete session" /dev/null
 
 response="$WORK_DIR/after-cleanup.json"
 curl --silent --show-error --output "$response" \
-  "$ENDPOINT/files?api-version=2025-10-02-preview&identifier=$CLEANUP_SESSION_ID" \
+  "$ENDPOINT/files?api-version=$PYTHON_API_VERSION&identifier=$CLEANUP_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN"
 jq -e '(.value | length) == 0' "$response" >/dev/null \
   || die "Session files survived deletion"
 
 http=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
-  "$ENDPOINT/files/cleanup-probe.csv/content?api-version=2025-10-02-preview&identifier=$CLEANUP_SESSION_ID" \
+  "$ENDPOINT/files/cleanup-probe.csv/content?api-version=$PYTHON_API_VERSION&identifier=$CLEANUP_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN")
 [[ "$http" == "404" ]] \
   || die "Deleted session file download must return 404 but returned $http"

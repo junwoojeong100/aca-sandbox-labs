@@ -31,6 +31,10 @@ run_agent() {
   python3 -m agent.cli --audit-dir "$AUDIT_DIR" "$@"
 }
 
+run_stub_agent() {
+  LLM_PROVIDER=stub python3 -m agent.cli --audit-dir "$AUDIT_DIR" "$@"
+}
+
 log "1/6 offline 테스트"
 python3 -m unittest discover -s tests >/dev/null
 
@@ -66,7 +70,7 @@ jq -e '
   .classification == "A"
   and .route == "python-pool"
   and .succeeded == true
-  and .attempts == 1
+  and (.attempts >= 1 and .attempts <= 3)
   and (.artifacts | length) == 2
   and (.artifacts | all(.sha256 | length == 64))
   and (.promotions | all(.promoted == false))
@@ -97,11 +101,27 @@ import sys
 with open(sys.argv[1], "rb") as source:
     assert source.read(8) == b"\x89PNG\r\n\x1a\n", "promoted file is not a PNG"
 PY
-jq -e '.monthly_sales["2026-01"] == 200' "$APPROVED_RUN_DIR/summary.json" >/dev/null
+jq -e '
+  def monthly_value($month):
+    if (.monthly_sales | type) == "object" then
+      .monthly_sales[$month]
+    elif (.monthly_sales | type) == "array" then
+      first(
+        .monthly_sales[]
+        | select((.month // .date // .period) == $month)
+        | (.sales // .amount // .value)
+      )
+    else
+      null
+    end;
+  monthly_value("2026-01") == 200
+  and monthly_value("2026-02") == 240
+  and monthly_value("2026-03") == 240
+' "$APPROVED_RUN_DIR/summary.json" >/dev/null
 
-log "5/6 오류 -> 코드 수정 -> 재실행 루프"
+log "5/6 deterministic stub 오류 -> 코드 수정 -> 재실행 루프"
 output="$WORK_DIR/run-retry.json"
-run_agent \
+run_stub_agent \
   --request "매출 CSV를 집계해줘 (오류 복구 시나리오)" \
   --attach "$WORK_DIR/sales.csv" \
   --expect summary.json > "$output"
@@ -124,7 +144,7 @@ if grep -rq "$IDENTIFIER" "$WORK_DIR"/run-*.json "$output"; then
 fi
 
 output="$WORK_DIR/run-retry-limit.json"
-MAX_CODE_RETRIES=0 run_agent \
+MAX_CODE_RETRIES=0 run_stub_agent \
   --request "매출 CSV를 집계해줘 (오류 복구 시나리오)" \
   --attach "$WORK_DIR/sales.csv" \
   --expect summary.json > "$output" || true

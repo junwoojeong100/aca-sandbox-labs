@@ -30,14 +30,14 @@ LibreOffice, Pandoc, Poppler와 폰트를 포함한 비루트 Custom Container i
 | DOCX·XLSX·PPTX 생성만 | Python pool로 충분하다 |
 | reportlab으로 단순 PDF 생성 | Python pool로 충분하다 |
 | **기존 Office 문서 -> PDF 변환** | Custom Container (LibreOffice 필요) |
-| **Markdown·HTML -> DOCX 변환** | Custom Container (Pandoc 필요) |
+| **Markdown·HTML -> DOCX 변환** | Custom Container image에 Pandoc 필요. 현재 reference API에는 미노출 |
 | **PDF 텍스트 추출·페이지 조작** | Custom Container (Poppler 필요) |
 | **CJK 폰트 렌더링 고정** | Custom Container |
 | **도구 버전을 image digest로 고정** | Custom Container |
 
 즉 Custom Container의 가치는 "Office 파일을 만든다"가 아니라 **"변환 fidelity와 도구 버전을 통제한다"** 에 있다. 이 구분을 먼저 정리해야 불필요한 ready session 비용을 피할 수 있다.
 
-이 실습의 reference API는 네 형식의 **생성**, 허용 목록 기반 **변환**, 선언적 **편집**을 검증한다. 임의 shell을 노출하지 않고 [권장 아키텍처의 Office 작업 API](../docs/AI_Workspace_Dynamic_Sessions_Reference_Architecture.md#47-office-작업-api)가 정의한 경계를 따른다.
+이 실습의 reference API는 네 형식의 **생성**, 허용 목록 기반 Office→PDF·TXT **변환**, 선언적 **편집**을 검증한다. Image에는 Pandoc이 포함돼 있지만 Markdown·HTML 변환 endpoint는 구현하지 않았다. 임의 shell을 노출하지 않고 [권장 아키텍처의 Office 작업 API](../docs/AI_Workspace_Dynamic_Sessions_Reference_Architecture.md#47-office-작업-api)가 정의한 경계를 따른다.
 
 ## 1. 사전 조건
 
@@ -50,7 +50,16 @@ LibreOffice, Pandoc, Poppler와 폰트를 포함한 비루트 Custom Container i
 - `curl`, `jq`, Python 3, `unzip`, `file`
 - `shasum` 또는 `sha256sum`
 
+현재 subscription과 필수 도구를 확인한다.
+
+```bash
+az account show --query '{name:name,id:id,user:user.name}' --output table
+command -v az curl jq python3 unzip file
+```
+
 Fast Path는 필요한 extension과 provider를 직접 준비하므로 실습 1이나 Python pool이 필요 없다. 수동 명령을 따라갈 때만 [실습 1A의 CLI와 provider 준비](01A_Python_Code_Interpreter_Admin_Lab.md#3-cli와-provider-준비)를 먼저 완료한다.
+
+Fast Path와 수동 절차는 같은 리소스를 만드는 **대체 경로**다. 처음 수행한다면 Fast Path만 실행하고, 실패 원인을 찾거나 개별 Azure 명령을 학습할 때만 2~16절의 수동 절차를 사용한다.
 
 ### 권장 Fast Path
 
@@ -70,14 +79,15 @@ bash scripts/office-lab.sh
 ACR 이름은 Azure 전체에서 고유한 영문 소문자와 숫자 조합이어야 한다.
 
 ```bash
-export SUBSCRIPTION_ID="<SUBSCRIPTION_ID>"
+export SUBSCRIPTION_ID="${SUBSCRIPTION_ID:-$(az account show --query id --output tsv)}"
 export RESOURCE_GROUP="rg-ai-workspace-sandbox-lab"
 export LOCATION="koreacentral"
-export ACR_NAME="<GLOBALLY_UNIQUE_ACR_NAME>"
+export ACR_NAME="${ACR_NAME:-aiws$(printf '%s' "$SUBSCRIPTION_ID" | tr -d '-' | cut -c1-20)}"
 export IDENTITY_NAME="id-ai-workspace-office-acr-pull"
 export LOG_WORKSPACE_NAME="log-ai-workspace-sandbox"
 export CONTAINER_ENV_NAME="env-ai-workspace-sandbox"
 export OFFICE_POOL_NAME="ai-workspace-office-sbx"
+export SESSION_API_VERSION="${SESSION_API_VERSION:-2025-02-02-preview}"
 export IMAGE_REPOSITORY="office-sandbox"
 export IMAGE_TAG="$(date -u +%Y%m%d%H%M%S)"
 export IMAGE="$ACR_NAME.azurecr.io/$IMAGE_REPOSITORY:$IMAGE_TAG"
@@ -86,6 +96,10 @@ export LAB_WORK_DIR="$PWD/.work/office-manual"
 
 az account set --subscription "$SUBSCRIPTION_ID"
 ```
+
+기본 ACR 이름은 subscription ID에서 생성한다. `az acr check-name --name "$ACR_NAME"`이 사용할 수 없다고 나오면 영문 소문자와 숫자로 된 다른 전역 고유 이름을 `ACR_NAME`에 지정한다.
+
+`SESSION_API_VERSION`은 이 repository에서 검증한 management API 값이다. Preview 오류가 발생하면 [공식 session 문서](https://learn.microsoft.com/azure/container-apps/sessions-usage)에서 endpoint와 request shape를 확인한 뒤 이 환경 변수만 재정의한다.
 
 ## 3. Quota 확인
 
@@ -116,6 +130,15 @@ az quota usage show \
   --query '{usage:properties.usages.value}' \
   --output json
 ```
+
+새 Office 환경과 pool을 모두 만들려면 다음 두 quota의 `limit - usage`가 각각 최소 1이어야 한다.
+
+| Quota | 필요한 경우 |
+| --- | --- |
+| `ManagedEnvironmentCount` | 같은 이름의 Container Apps Environment가 없을 때 |
+| `SessionPools` | 같은 이름의 Office session pool이 없을 때 |
+
+CLI가 값을 반환하지 않거나 사용 가능 수량이 0이면 [Azure Portal My quotas](https://portal.azure.com/#view/Microsoft_Azure_Capacity/QuotaMenuBlade/~/myQuotas)에서 Provider를 **Azure Container Apps**로 선택하고 `LOCATION`과 같은 region의 quota를 확인한다. 부족하면 증가를 요청하거나 기존 Environment·pool 재사용 여부를 결정한다.
 
 ## 4. ACR 생성
 
@@ -336,6 +359,8 @@ az containerapp sessionpool show \
 
 ## 10. Session Executor 역할
 
+`Contributor`는 resource를 만들 수 있지만 role assignment 권한은 없다. `AuthorizationFailed`가 나오면 `Owner` 또는 `User Access Administrator`에게 이 절의 역할 할당을 요청한다.
+
 ```bash
 export OFFICE_POOL_ID=$(az containerapp sessionpool show \
   --name "$OFFICE_POOL_NAME" \
@@ -343,18 +368,36 @@ export OFFICE_POOL_ID=$(az containerapp sessionpool show \
   --query id \
   --output tsv)
 
-export CALLER_OBJECT_ID=$(az ad signed-in-user show \
-  --query id \
-  --output tsv)
+if [[ -z "${CALLER_OBJECT_ID:-}" ]]; then
+  export CALLER_OBJECT_ID=$(az ad signed-in-user show \
+    --query id \
+    --output tsv)
+  export CALLER_PRINCIPAL_TYPE="User"
+fi
+export CALLER_PRINCIPAL_TYPE="${CALLER_PRINCIPAL_TYPE:-User}"
 
 az role assignment create \
   --role "Azure ContainerApps Session Executor" \
   --assignee-object-id "$CALLER_OBJECT_ID" \
-  --assignee-principal-type User \
+  --assignee-principal-type "$CALLER_PRINCIPAL_TYPE" \
   --scope "$OFFICE_POOL_ID"
 ```
 
 실제 AI Workspace에서는 사용자가 아니라 backend Managed Identity에 부여한다.
+
+Service Principal로 실행한다면 미리 `CALLER_OBJECT_ID`를 principal object ID로, `CALLER_PRINCIPAL_TYPE=ServicePrincipal`로 설정한다.
+
+역할 할당을 확인한다.
+
+```bash
+az role assignment list \
+  --assignee "$CALLER_OBJECT_ID" \
+  --scope "$OFFICE_POOL_ID" \
+  --query "[?roleDefinitionName=='Azure ContainerApps Session Executor'].{role:roleDefinitionName,scope:scope}" \
+  --output table
+```
+
+역할 전파는 수 분 걸릴 수 있다. `/health`가 403이면 30~60초 기다린 뒤 `TOKEN`을 다시 발급한다.
 
 ## 11. Health endpoint
 
@@ -377,6 +420,8 @@ export OFFICE_ENDPOINT=$(az containerapp sessionpool show \
 
 export OFFICE_SESSION_ID="office-$(uuidgen | tr '[:upper:]' '[:lower:]')"
 ```
+
+이 시점부터 16절까지의 수동 명령은 repository root가 아니라 `$LAB_WORK_DIR`에서 실행한다.
 
 Custom Container session에도 SSH·RDP나 Azure Portal terminal로 접속하지 않는다. Management endpoint 뒤의 path가 container HTTP API로 전달되며, 이 reference image는 HTML 화면 대신 JSON과 파일 stream만 반환한다.
 
@@ -662,7 +707,7 @@ Custom Container management API는 `POST`를 사용한다.
 ```bash
 curl --fail-with-body --silent --show-error \
   --request POST \
-  "$OFFICE_ENDPOINT/.management/getSession?api-version=2025-02-02-preview&identifier=$OFFICE_SESSION_ID" \
+  "$OFFICE_ENDPOINT/.management/getSession?api-version=$SESSION_API_VERSION&identifier=$OFFICE_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN"
 ```
 
@@ -765,7 +810,7 @@ curl --silent --output /dev/null --write-out 'health HTTP %{http_code}\n' \
 
 curl --silent --output /dev/null --write-out 'stop HTTP %{http_code}\n' \
   --request POST \
-  "$OFFICE_ENDPOINT/.management/stopSession?api-version=2025-02-02-preview&identifier=$DIAG_SESSION_ID" \
+  "$OFFICE_ENDPOINT/.management/stopSession?api-version=$SESSION_API_VERSION&identifier=$DIAG_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN"
 ```
 
@@ -863,6 +908,8 @@ az monitor metrics list \
 | `/edit` HTTP 400 `Formula values are not allowed` | 의도된 동작이다. 수식은 기본 차단한다 |
 | `/convert` 또는 `/edit` HTTP 404 | `jobId`가 없거나 job TTL 1시간이 지났다 |
 | HTTP 429 | 동시 session 한도(`--max-sessions`)에 걸렸다. 기존 session을 stop하거나 한도를 올린다 |
+| HTTP 400 `SessionRequestValidationFailed` | `identifier`, `api-version`, endpoint와 method 확인. 응답의 `target`, `traceId` 기록 |
+| HTTP 400 `SessionRequestNotSupported` | management endpoint와 container endpoint를 혼동하지 않았는지 확인 |
 | KQL `SemanticError`로 테이블 없음 | 테이블 이름 또는 수집 경로 문제다. 15.1~15.2절 참고 |
 | `AppEnvSessionConsoleLogs_CL`만 보임 | 진단 설정이 없다. 15.2절을 수행한다 |
 | 진단 설정 후에도 테이블 없음 | 수집까지 2~5분 걸린다. 세션을 한 번 만든 뒤 다시 조회한다 |
@@ -883,12 +930,26 @@ az monitor metrics list \
 
 따라서 **pool만 지우면 비용이 다 사라지지 않는다.** 실습 전용 Resource Group을 썼다면 그룹 단위 삭제가 가장 확실하다.
 
-Session 중지:
+Fast Path로 시작한 경우에도 동작하도록 repository root로 돌아가 기본 이름을 다시 설정하고 삭제 대상을 확인한다.
+
+```bash
+cd "${REPO_ROOT:-$PWD}"
+test -f scripts/cleanup.sh || {
+  echo "repository root에서 실행해야 합니다" >&2
+  exit 1
+}
+export RESOURCE_GROUP="${RESOURCE_GROUP:-rg-ai-workspace-sandbox-lab}"
+export OFFICE_POOL_NAME="${OFFICE_POOL_NAME:-ai-workspace-office-sbx}"
+az group show --name "$RESOURCE_GROUP" \
+  --query '{name:name,location:location,id:id}' --output table
+```
+
+수동 경로에서 만든 Session 중지:
 
 ```bash
 curl --fail-with-body --silent --show-error \
   --request POST \
-  "$OFFICE_ENDPOINT/.management/stopSession?api-version=2025-02-02-preview&identifier=$OFFICE_SESSION_ID" \
+  "$OFFICE_ENDPOINT/.management/stopSession?api-version=$SESSION_API_VERSION&identifier=$OFFICE_SESSION_ID" \
   --header "Authorization: Bearer $TOKEN"
 ```
 

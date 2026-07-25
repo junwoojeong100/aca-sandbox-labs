@@ -27,6 +27,8 @@
 - [실습 1: Python Code Interpreter와 LLM](../labs/01_Python_Code_Interpreter_Lab.md)
 - [실습 2: Office Custom Container](../labs/02_Office_Custom_Container_Lab.md)
 
+이 문서는 선형 실습서가 아니라 설계 참고 자료다. 처음 보는 독자는 1~4절로 전체 구조를 이해한 뒤 역할별 실습을 먼저 수행하고, 보안·운영 설계가 필요할 때 5절 이후를 찾아보는 순서를 권장한다.
+
 ## 1. 목적
 
 AI Workspace의 LLM과 Agent가 사용자의 자연어 요청을 분석하고 코드 또는 문서 생성 계획을 만든 뒤, Azure Container Apps Dynamic Sessions에서 신뢰할 수 없는 코드와 파일을 격리 실행하는 구조를 정의한다.
@@ -37,19 +39,19 @@ AI Workspace의 LLM과 Agent가 사용자의 자연어 요청을 분석하고 �
 
 | AI Workspace 요구사항 | Azure 권장 대응 | 검증 위치 |
 | --- | --- | --- |
-| Python 코드 생성·실행 | Python Code Interpreter session pool | [실습 1B §3](../labs/01B_Python_Code_Interpreter_User_Lab.md#3-실제-llm에-자연어-요청) |
-| 오류 수정과 재실행 | 제한된 `stdout`·`stderr`, 코드 hash와 재시도 정책 | [실습 1A §13.2](../labs/01A_Python_Code_Interpreter_Admin_Lab.md#132-오류-발생-코드-수정-재실행), [실습 1B §5](../labs/01B_Python_Code_Interpreter_User_Lab.md#5-오류-복구와-정책-거부) |
+| Python 코드 생성·실행 | Python Code Interpreter session pool | [실습 1B §4](../labs/01B_Python_Code_Interpreter_User_Lab.md#4-실제-llm에-자연어-요청) |
+| 오류 수정과 재실행 | 제한된 `stdout`·`stderr`, 코드 hash와 재시도 정책 | [실습 1A §13.2](../labs/01A_Python_Code_Interpreter_Admin_Lab.md#132-오류-발생-코드-수정-재실행), [실습 1B §6](../labs/01B_Python_Code_Interpreter_User_Lab.md#6-오류-복구와-정책-거부) |
 | 분석·계산·차트·파일 생성 | Code Interpreter의 `/mnt/data`와 격리된 artifact staging | [실습 1A §9~12](../labs/01A_Python_Code_Interpreter_Admin_Lab.md#9-샘플-csv와-분석-코드) |
-| 첨부파일 분석·가공 | 업로드 전 형식·크기·malware 검사 후 session에 복사 | [실습 1B §2~3](../labs/01B_Python_Code_Interpreter_User_Lab.md#2-첨부파일-준비) |
-| Office 문서 생성 | Python pool 또는 Custom Container | [실습 2B §2](../labs/02B_Office_Custom_Container_User_Lab.md#2-생성-요청) |
-| Office 문서 변환 | 허용 matrix 기반 LibreOffice·Pandoc 변환 | [실습 2B §3](../labs/02B_Office_Custom_Container_User_Lab.md#3-변환-요청) |
-| Office 문서 편집 | 선언적 operation 허용 목록 | [실습 2B §4](../labs/02B_Office_Custom_Container_User_Lab.md#4-선언적-편집-요청) |
+| 첨부파일 분석·가공 | 업로드 전 형식·크기·malware 검사 후 session에 복사 | [실습 1B §3~4](../labs/01B_Python_Code_Interpreter_User_Lab.md#3-첨부파일-준비) |
+| Office 문서 생성 | Python pool 또는 Custom Container | [실습 2B §3](../labs/02B_Office_Custom_Container_User_Lab.md#3-생성-요청) |
+| Office 문서 변환 | 허용 matrix 기반 LibreOffice 변환. Pandoc은 확장 후보 | [실습 2B §4](../labs/02B_Office_Custom_Container_User_Lab.md#4-변환-요청) |
+| Office 문서 편집 | 선언적 operation 허용 목록 | [실습 2B §5](../labs/02B_Office_Custom_Container_User_Lab.md#5-선언적-편집-요청) |
 | 작업별 독립 환경 | 암호학적으로 생성한 요청 또는 대화 단위 identifier | [실습 1A §13.1](../labs/01A_Python_Code_Interpreter_Admin_Lab.md#131-세션-간-격리-확인) |
 | 실행 시간·CPU·메모리 제한 | 플랫폼 강제 한도와 정책 엔진 사전 분류 | [실습 1A §13.3](../labs/01A_Python_Code_Interpreter_Admin_Lab.md#133-실행-시간과-메모리-한도) |
 | 네트워크 접근 제한 | `EgressDisabled` pool 속성 | [실습 1A §13](../labs/01A_Python_Code_Interpreter_Admin_Lab.md#13-egress-차단-확인) |
-| 허용 명령어 제한 | 정책 엔진과 Office 작업 API. 4.4.1절 참고 | [실습 1B §5](../labs/01B_Python_Code_Interpreter_User_Lab.md#5-오류-복구와-정책-거부), [실습 2B §4](../labs/02B_Office_Custom_Container_User_Lab.md#4-선언적-편집-요청) |
+| 허용 명령어 제한 | 정책 엔진과 Office 작업 API. 4.4.1절 참고 | [실습 1B §6](../labs/01B_Python_Code_Interpreter_User_Lab.md#6-오류-복구와-정책-거부), [실습 2B §5](../labs/02B_Office_Custom_Container_User_Lab.md#5-선언적-편집-요청) |
 | 임시 파일 자동 정리 | Timed lifecycle, cooldown, 명시적 stop/delete API | [실습 1A §14.1](../labs/01A_Python_Code_Interpreter_Admin_Lab.md#141-session-종료와-임시-파일-자동-정리) |
-| 승인 후 실제 반영 | Sandbox와 분리된 Approval Service 및 최소 권한 Connector | [실습 1B §4](../labs/01B_Python_Code_Interpreter_User_Lab.md#4-결과-검토와-승인) |
+| 승인 후 실제 반영 | Sandbox와 분리된 Approval Service 및 최소 권한 Connector | [실습 1B §5](../labs/01B_Python_Code_Interpreter_User_Lab.md#5-결과-검토와-승인) |
 
 ## 3. 권장 논리 아키텍처
 
@@ -221,12 +223,14 @@ Custom Container가 임의 command와 shell argument를 받게 하지 않는다.
 
 `office_gateway/`는 이 내부 API 앞에 두는 사용자용 reference gateway다. Azure token, pool endpoint, session identifier와 container `jobId`를 숨기고 `/api/document-jobs` 아래의 public job ID, 안전한 파일 metadata, 승인 API만 노출한다. 실습용 `X-Demo-User` header는 production 인증이 아니며 실제 배포에서는 Entra access token 검증과 tenant authorization으로 대체한다.
 
+현재 reference image에는 Pandoc이 설치돼 있지만 `/convert` 허용 matrix는 Office 파일의 PDF·TXT 변환만 노출한다. Markdown·HTML 변환을 제공하려면 입력 검사, 허용 source-target 조합과 API schema를 명시적으로 추가해야 한다.
+
 `python_gateway/`는 Python Agent 앞의 사용자용 reference gateway다. Multipart 자연어·첨부파일 요청을 `/api/analysis-jobs`로 받고 public job ID, 안전한 실행 결과와 artifact metadata만 반환한다. 승인 API는 코드를 다시 실행하지 않고 최초 실행에서 staging한 동일 artifact의 hash를 재검증해 승격한다.
 
 허용할 편집 operation 예:
 
 - DOCX: text placeholder 교체, section 추가, metadata 제거
-- XLSX: 지정 range 값·수식 입력, chart 생성, sheet 이름 변경
+- XLSX: 지정 range 값, chart 생성, sheet 이름 변경. 수식은 외부 참조 위험 때문에 reference 구현에서 기본 차단하며 별도 정책을 정의한 경우에만 허용
 - PPTX: placeholder 교체, slide 추가, image 배치
 - PDF: Office 원본에서 재생성, 페이지 병합·분할처럼 명시적으로 허용된 작업
 
@@ -400,7 +404,7 @@ Broker나 LLM client는 두 규약을 모두 처리하도록 만들고, `unsuppo
 ### 10.3 Capacity
 
 - `max-sessions`와 tenant별 concurrency를 별도로 제한한다.
-- quota는 `az quota list`와 `az quota usage list`로 확인한다.
+- `Session pools`와 `Managed Environment Count` regional quota는 Azure Portal **My quotas**에서 Azure Container Apps provider를 선택해 확인한다. CLI 조회는 자동 사전 점검에 사용하되 값이 없으면 Portal을 기준으로 판단한다.
 - Custom Container pool의 `ready-sessions`는 0을 허용하지 않을 수 있다. 2026-07-24 한국 중부 실제 검증에서는 최소 1이 필요했다.
 - ready session은 cold start를 줄이지만 지속 비용을 발생시킨다.
 - latency SLO와 비용을 함께 측정해 최소값부터 조정한다.
@@ -692,7 +696,7 @@ Office 변환·편집, CJK 폰트 고정 또는 도구 버전 고정이 필요�
 - [Code Interpreter sessions](https://learn.microsoft.com/azure/container-apps/sessions-code-interpreter)
 - [Custom Container sessions](https://learn.microsoft.com/azure/container-apps/sessions-custom-container)
 - [Session pool 구성](https://learn.microsoft.com/azure/container-apps/session-pool)
-- [Azure Quotas](https://learn.microsoft.com/azure/quotas/quotas-overview)
+- [Container Apps quotas](https://learn.microsoft.com/azure/container-apps/quotas)
 - [Container Apps 가격](https://azure.microsoft.com/pricing/details/container-apps/)
 - [Azure OpenAI Entra 인증](https://learn.microsoft.com/azure/ai-services/openai/how-to/managed-identity)
 - [Container Apps Jobs](https://learn.microsoft.com/azure/container-apps/jobs)

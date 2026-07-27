@@ -6,6 +6,7 @@ Azure 없이 정책, 산출물 검사, 승인 게이트, 오류 재시도 루프
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -32,12 +33,26 @@ class PolicyTests(unittest.TestCase):
         decision = policy.classify(self._input("결과를 pptx 보고서로 만들어줘"))
         self.assertEqual(decision.classification, "B")
         self.assertEqual(decision.route, policy.Route.OFFICE_POOL)
+        self.assertIn("edit", decision.controls["allowedOperations"])
 
     def test_office_attachment_routes_to_office_pool(self) -> None:
         decision = policy.classify(
             self._input("이 파일 정리해줘", attachment_names=("plan.docx",))
         )
         self.assertEqual(decision.route, policy.Route.OFFICE_POOL)
+        self.assertFalse(decision.allowed)
+        self.assertFalse(decision.controls["inputUploadImplemented"])
+
+    def test_office_request_with_csv_attachment_is_rejected(self) -> None:
+        decision = policy.classify(
+            self._input(
+                "이 CSV로 pptx를 만들어줘",
+                attachment_names=("data.csv",),
+                attachment_sizes=(1024,),
+            )
+        )
+        self.assertEqual(decision.route, policy.Route.OFFICE_POOL)
+        self.assertFalse(decision.allowed)
 
     def test_long_running_request_is_class_c(self) -> None:
         decision = policy.classify(self._input("대량 배치", estimated_seconds=600))
@@ -47,9 +62,35 @@ class PolicyTests(unittest.TestCase):
 
     def test_oversized_attachment_is_class_c(self) -> None:
         decision = policy.classify(
-            self._input("분석해줘", attachment_bytes=200 * 1024 * 1024)
+            self._input("분석해줘", attachment_sizes=(200 * 1024 * 1024,))
         )
         self.assertEqual(decision.classification, "C")
+
+    def test_office_attachment_is_rejected_before_code_interpreter_limits(self) -> None:
+        decision = policy.classify(
+            self._input(
+                "첨부한 PPTX를 편집해줘",
+                attachment_names=("deck.pptx",),
+                attachment_sizes=(200 * 1024 * 1024,),
+                estimated_seconds=600,
+            )
+        )
+        self.assertEqual(decision.classification, "B")
+        self.assertEqual(decision.route, policy.Route.OFFICE_POOL)
+        self.assertFalse(decision.allowed)
+        self.assertNotIn("maxExecutionSeconds", decision.controls)
+
+    def test_reference_gateway_also_has_aggregate_attachment_limit(self) -> None:
+        decision = policy.classify(
+            self._input(
+                "두 CSV를 비교해줘",
+                attachment_names=("a.csv", "b.csv"),
+                attachment_sizes=(70 * 1024 * 1024, 70 * 1024 * 1024),
+            )
+        )
+        self.assertEqual(decision.classification, "C")
+        self.assertFalse(decision.allowed)
+        self.assertIn("요청 body 한도", decision.reason)
 
     def test_internet_request_is_class_d(self) -> None:
         decision = policy.classify(self._input("https://example.com 에서 받아와줘"))
@@ -224,6 +265,39 @@ class ExecutionResultTests(unittest.TestCase):
         result = broker.ExecutionResult("Succeeded", "ok\n", "")
         self.assertTrue(result.succeeded)
         self.assertEqual(result.warnings, "")
+
+    def test_execute_retries_with_properties_wrapper_for_api_drift(self) -> None:
+        requests = []
+        original_request = broker._request
+        original_get_token = broker.get_token
+
+        def fake_request(method, url, **kwargs):
+            requests.append(kwargs["body"])
+            if len(requests) == 1:
+                return (
+                    400,
+                    b'{"error":{"code":"SessionPropertiesMissing"}}',
+                    "application/json",
+                )
+            return (
+                200,
+                b'{"status":"Succeeded","result":{"stdout":"ok","stderr":""}}',
+                "application/json",
+            )
+
+        broker._request = fake_request
+        broker.get_token = lambda *_args, **_kwargs: "token"
+        try:
+            result = broker.PythonSession("https://example.invalid").execute(
+                "print('ok')"
+            )
+        finally:
+            broker._request = original_request
+            broker.get_token = original_get_token
+
+        self.assertTrue(result.succeeded)
+        self.assertNotIn("properties", json.loads(requests[0]))
+        self.assertIn("properties", json.loads(requests[1]))
 
 
 class FakeSession:

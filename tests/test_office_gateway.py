@@ -43,12 +43,14 @@ class FakeOfficeClient:
 
     def edit(self, job_id: str, operations):
         self.payloads["report.edited.docx"] = b"PK\x03\x04edited-docx"
+        self.payloads["report.edited.pptx"] = b"PK\x03\x04edited-pptx"
         self.payloads["report.edited.xlsx"] = b"PK\x03\x04edited-xlsx"
         return {
             "jobId": job_id,
             "applied": len(operations),
             "files": [
                 self.metadata("report.edited.docx"),
+                self.metadata("report.edited.pptx"),
                 self.metadata("report.edited.xlsx"),
             ],
         }
@@ -184,7 +186,7 @@ class OfficeGatewayServiceTests(unittest.TestCase):
             public_id,
             [{"op": "replaceText", "find": "Draft", "replace": "Approved"}],
         )
-        self.assertEqual(len(edited["files"]), 2)
+        self.assertEqual(len(edited["files"]), 3)
 
     def test_approval_stages_and_promotes_all_files(self) -> None:
         result = self.create_job()

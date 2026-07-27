@@ -34,6 +34,7 @@ for attempt in $(seq 1 30); do
   sleep 2
 done
 jq -e '.status == "ok"' "$WORK_DIR/health.json" >/dev/null
+jq -e '.release == "dev"' "$WORK_DIR/health.json" >/dev/null
 jq -e '
   .limits.maxRequestBytes == 1048576
   and .limits.maxJobs == 20
@@ -249,8 +250,11 @@ curl --fail --silent --show-error \
   ]}" \
   --output "$WORK_DIR/edit.json"
 test "$(jq '.applied' "$WORK_DIR/edit.json")" = "3"
-test "$(jq '.files | length' "$WORK_DIR/edit.json")" = "2"
-for file_name in report.edited.docx report.edited.xlsx; do
+test "$(jq '.files | length' "$WORK_DIR/edit.json")" = "3"
+for file_name in \
+  report.edited.docx \
+  report.edited.pptx \
+  report.edited.xlsx; do
   download_path=$(jq -r --arg name "$file_name" \
     '.files[] | select(.name == $name) | .downloadPath' "$WORK_DIR/edit.json")
   expected_hash=$(jq -r --arg name "$file_name" \
@@ -261,7 +265,10 @@ for file_name in report.edited.docx report.edited.xlsx; do
     || die "Hash mismatch: $file_name"
   unzip -t "$WORK_DIR/$file_name" >/dev/null
 done
-python3 - "$WORK_DIR/report.edited.xlsx" "$WORK_DIR/report.edited.docx" <<'PY'
+python3 - \
+  "$WORK_DIR/report.edited.xlsx" \
+  "$WORK_DIR/report.edited.docx" \
+  "$WORK_DIR/report.edited.pptx" <<'PY'
 import sys
 import zipfile
 
@@ -276,6 +283,15 @@ with zipfile.ZipFile(sys.argv[2]) as document:
     body = document.read("word/document.xml").decode("utf-8")
     assert "Edited title" in body, "replaceText was not applied"
     assert "Local smoke test" not in body, "original text was not replaced"
+
+with zipfile.ZipFile(sys.argv[3]) as presentation:
+    slides = "".join(
+        presentation.read(name).decode("utf-8")
+        for name in presentation.namelist()
+        if name.startswith("ppt/slides/slide") and name.endswith(".xml")
+    )
+    assert "Edited title" in slides, "PPTX replaceText was not applied"
+    assert "Local smoke test" not in slides, "PPTX original text was not replaced"
 print("edit assertions passed")
 PY
 

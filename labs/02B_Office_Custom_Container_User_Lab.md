@@ -184,6 +184,8 @@ curl --fail-with-body --silent --show-error \
 4. 승인 대상 artifact의 SHA-256
 5. 최종 저장 위치
 
+> Reference Gateway는 파일 metadata, 다운로드와 hash 기반 승인만 구현한다. 렌더링된 미리보기·Diff, malware·DLP 결과와 실제 업무 Connector는 Production AI Workspace가 추가해야 한다.
+
 승인 전에는 artifact가 staging에만 있어야 한다. 승인 후에는 Sandbox와 분리된 Approval Service가 hash를 다시 확인하고 최소 권한 Connector로 복사한다.
 
 실습 gateway는 파일을 다시 다운로드해 형식·macro·hash를 검사한 뒤 `.work/office-user/approved/`에 승격한다.

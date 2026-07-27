@@ -358,6 +358,14 @@ http=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' 
 [[ "$http" == "404" ]] \
   || die "Deleted session file download must return 404 but returned $http"
 
+# 삭제 후 files 조회는 같은 identifier에 빈 session을 다시 할당할 수 있다.
+# 검증을 위해 재생성된 빈 session도 즉시 삭제한다.
+http=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+  --request DELETE \
+  "$ENDPOINT/session?api-version=$SESSION_API_VERSION&identifier=$CLEANUP_SESSION_ID" \
+  --header "Authorization: Bearer $TOKEN")
+expect_2xx "$http" "Delete recreated cleanup session" /dev/null
+
 cat > "$WORK_DIR/validation.txt" <<EOF
 pool=$PYTHON_POOL_NAME
 session=$SESSION_ID

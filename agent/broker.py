@@ -150,21 +150,31 @@ class PythonSession:
         return f"{self.endpoint}/{path.lstrip('/')}?{query}"
 
     def execute(self, code: str, *, timeout: int = 300) -> ExecutionResult:
-        body = json.dumps(
-            {
-                "codeInputType": "inline",
-                "executionType": "synchronous",
-                "code": code,
-            }
-        ).encode("utf-8")
-        status, payload, _ = _request(
-            "POST",
-            self._url("executions"),
-            token=get_token(),
-            body=body,
-            headers={"Content-Type": "application/json"},
-            timeout=timeout,
-        )
+        properties = {
+            "codeInputType": "inline",
+            "executionType": "synchronous",
+            "code": code,
+        }
+        status = 0
+        payload = b""
+        for wrapped in (False, True):
+            request_body = {"properties": properties} if wrapped else properties
+            status, payload, _ = _request(
+                "POST",
+                self._url("executions"),
+                token=get_token(),
+                body=json.dumps(request_body).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                timeout=timeout,
+            )
+            if status != 400 or wrapped:
+                break
+            try:
+                error_code = json.loads(payload).get("error", {}).get("code")
+            except (json.JSONDecodeError, AttributeError):
+                error_code = None
+            if error_code != "SessionPropertiesMissing":
+                break
         data = _json_or_raise(status, payload, "Python 실행")
         result = data.get("result") or {}
         if not isinstance(result, dict):

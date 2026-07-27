@@ -166,7 +166,9 @@ class Orchestrator:
                 user_id=user_id,
                 request_text=request_text,
                 attachment_names=tuple(attachments),
-                attachment_bytes=sum(len(value) for value in attachments.values()),
+                attachment_sizes=tuple(
+                    len(value) for value in attachments.values()
+                ),
                 estimated_seconds=estimated_seconds,
             )
         )

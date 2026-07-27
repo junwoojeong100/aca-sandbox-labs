@@ -1,6 +1,7 @@
 import hashlib
 import json
 import mimetypes
+import os
 import re
 import shutil
 import subprocess
@@ -77,7 +78,7 @@ TOOL_VERSIONS = {
 }
 
 EDITED_FILES = frozenset(
-    {"report.edited.docx", "report.edited.xlsx"}
+    {"report.edited.docx", "report.edited.pptx", "report.edited.xlsx"}
 )
 ALLOWED_DOWNLOADS = (
     GENERATED_FILES | frozenset(CONVERSION_MATRIX.values()) | EDITED_FILES
@@ -173,7 +174,15 @@ def _edit_rename_sheet(job_dir: Path, operation: dict[str, object]) -> Path:
     return output
 
 
-def _edit_replace_text(job_dir: Path, operation: dict[str, object]) -> Path:
+def _replace_runs(runs: object, find: str, replace: str) -> None:
+    for run in runs:
+        if find in run.text:
+            run.text = run.text.replace(find, replace)
+
+
+def _edit_replace_text(
+    job_dir: Path, operation: dict[str, object]
+) -> tuple[Path, Path]:
     find = operation.get("find")
     replace = operation.get("replace")
     if not isinstance(find, str) or not find:
@@ -193,19 +202,35 @@ def _edit_replace_text(job_dir: Path, operation: dict[str, object]) -> Path:
 
     document = Document(str(source))
     for paragraph in document.paragraphs:
-        for run in paragraph.runs:
-            if find in run.text:
-                run.text = run.text.replace(find, replace)
+        _replace_runs(paragraph.runs, find, replace)
     for table in document.tables:
         for row in table.rows:
             for cell in row.cells:
                 for paragraph in cell.paragraphs:
-                    for run in paragraph.runs:
-                        if find in run.text:
-                            run.text = run.text.replace(find, replace)
-    output = job_dir / "report.edited.docx"
-    document.save(str(output))
-    return output
+                    _replace_runs(paragraph.runs, find, replace)
+    docx_output = job_dir / "report.edited.docx"
+    document.save(str(docx_output))
+
+    presentation_source = job_dir / "report.edited.pptx"
+    if not presentation_source.is_file():
+        presentation_source = job_dir / "report.pptx"
+    if not presentation_source.is_file():
+        raise EditError("report.pptx not found in job")
+
+    presentation = Presentation(str(presentation_source))
+    for slide in presentation.slides:
+        for shape in slide.shapes:
+            if getattr(shape, "has_text_frame", False):
+                for paragraph in shape.text_frame.paragraphs:
+                    _replace_runs(paragraph.runs, find, replace)
+            if getattr(shape, "has_table", False):
+                for row in shape.table.rows:
+                    for cell in row.cells:
+                        for paragraph in cell.text_frame.paragraphs:
+                            _replace_runs(paragraph.runs, find, replace)
+    pptx_output = job_dir / "report.edited.pptx"
+    presentation.save(str(pptx_output))
+    return docx_output, pptx_output
 
 
 EDIT_HANDLERS = {
@@ -223,8 +248,10 @@ def apply_edit_operations(
         temporary_dir = Path(temporary)
         for name in (
             "report.docx",
+            "report.pptx",
             "report.xlsx",
             "report.edited.docx",
+            "report.edited.pptx",
             "report.edited.xlsx",
         ):
             source = job_dir / name
@@ -235,7 +262,9 @@ def apply_edit_operations(
         for operation in operations:
             handler = EDIT_HANDLERS[str(operation["op"])]
             result = handler(temporary_dir, operation)
-            outputs[result.name] = result
+            paths = result if isinstance(result, tuple) else (result,)
+            for path in paths:
+                outputs[path.name] = path
 
         backups: dict[str, Path | None] = {}
         for name in outputs:
@@ -311,6 +340,7 @@ class Handler(BaseHTTPRequestHandler):
                 HTTPStatus.OK,
                 {
                     "status": "ok",
+                    "release": os.environ.get("BUILD_VERSION", "dev"),
                     "tools": TOOL_VERSIONS,
                     "operations": {
                         "generate": ["docx", "pdf", "pptx", "xlsx"],

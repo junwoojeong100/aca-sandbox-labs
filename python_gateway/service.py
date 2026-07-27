@@ -17,6 +17,7 @@ from agent import broker, config, llm, orchestrator, staging
 SAFE_USER = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 MAX_REQUEST_CHARS = 20_000
 MAX_ATTACHMENTS = 10
+MAX_ATTACHMENT_BYTES = 128 * 1024 * 1024
 MAX_TOTAL_ATTACHMENT_BYTES = 128 * 1024 * 1024
 INTERNAL_PATH = re.compile(
     r"(?<!\w)/(?:mnt/data|Users|home|tmp|var)(?:/[^\s'\";,)\]]+)*"
@@ -90,6 +91,8 @@ class PythonGatewayService:
                 raise GatewayError(400, f"예약된 첨부파일 이름: {name}")
             if not payload:
                 raise GatewayError(400, f"빈 첨부파일: {name}")
+            if len(payload) > MAX_ATTACHMENT_BYTES:
+                raise GatewayError(413, f"{name} 크기가 128MB를 초과했다")
         for name in expected_outputs:
             if not staging.SAFE_NAME.match(name):
                 raise GatewayError(400, f"안전하지 않은 결과 파일 이름: {name}")

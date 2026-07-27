@@ -279,7 +279,7 @@ cat first-execution.json
 - `status`가 `Succeeded`
 - `result.stdout`에 validation 문구 포함
 
-> 2026-07-24 한국 중부의 기본 `PYTHON_API_VERSION` endpoint에서 execution 속성은 JSON 최상위에 있어야 했다. `properties`로 감싸면 `SessionPropertiesMissing`이 발생했다.
+> 2026-07-24 한국 중부의 기본 `PYTHON_API_VERSION` endpoint에서는 execution 속성을 JSON 최상위에 둬야 했다. 현재 공식 예제는 `properties` wrapper를 사용하는 시점도 있으므로, Production client는 API version을 고정하고 `SessionPropertiesMissing`에서 두 request shape를 한 번만 호환 재시도한다.
 
 ## 8.1 사전 설치 라이브러리 확인
 
@@ -751,6 +751,8 @@ curl --silent \
 
 같은 identifier를 다시 써도 새로 할당된 빈 session이며 이전 파일은 복구되지 않는다. **session은 영구 저장소가 아니다.** 보존해야 하는 결과물은 정리 전에 Artifact Staging으로 명시적으로 옮긴다.
 
+> `DELETE /session` 후 파일 목록을 조회하면 검증 요청 자체가 같은 identifier에 새 빈 session을 할당할 수 있다. 파일이 비었음을 확인한 뒤 이 빈 session도 다시 `DELETE /session`으로 정리한다. 자동 스크립트는 두 번째 삭제까지 수행한다.
+
 운영 권장:
 
 - 작업이 끝나면 cooldown을 기다리지 말고 delete session API로 즉시 회수한다. 용량과 비용에 유리하다.
@@ -769,7 +771,7 @@ curl --silent \
 | HTTP 200인데 `status: Failed` | `result.stderr` 확인. timeout과 메모리 초과가 여기로 온다 |
 | `Request timed out waiting for code execution to complete` | 220초 한도 초과. 작업 분할 또는 비동기 compute |
 | `Execution aborted` | 메모리 한도 초과. 데이터 분할 처리 |
-| `SessionPropertiesMissing` | execution 속성의 `properties` 래퍼 제거 |
+| `SessionPropertiesMissing` | 현재 API version의 공식 schema 확인. reference Broker는 top-level과 `properties` wrapper를 한 번씩 호환 시도 |
 | `SessionRequestValidationFailed` | `identifier`, `api-version`, endpoint와 method 확인. 응답의 `target`, `traceId` 기록 |
 | `SessionRequestNotSupported` | 현재 API version에서 endpoint 또는 HTTP method가 지원되는지 공식 data-plane API 문서 확인 |
 | `SessionWithIdentifierNotFound` | 새 identifier로 업로드부터 재실행 |

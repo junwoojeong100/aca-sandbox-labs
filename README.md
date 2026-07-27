@@ -134,7 +134,7 @@ Azure Portal에서는 pool 구성, provisioning 상태, metrics와 logs를 확�
 | DOCX, XLSX, PPTX, PDF 생성 | 실습 1A §8.1, 실습 2B §3 |
 | Office 문서 변환과 편집 | 실습 2B §4~5 |
 | 사용자 또는 요청 단위의 독립 세션과 임시 파일 공간 | 실습 1A §13.1 |
-| 실행 시간, 메모리, 네트워크, 허용 명령어 제한 | 실습 1A §13, §13.3, 실습 1B §6 |
+| Code Interpreter 실행 시간·업로드·메모리, Custom Container CPU·메모리·lifecycle, 네트워크와 허용 명령어 제한 | 실습 1A §13, §13.3, 실습 2A §9, 실습 1B §6 |
 | 작업 완료 또는 session 종료 시 환경과 파일 자동 정리 | 실습 1A §14.1 |
 | 검사, 미리보기, Diff와 사용자 승인 후 실제 업무 시스템 반영 | 실습 1B §5, 실습 2B §6 |
 
@@ -192,7 +192,7 @@ AI Workspace 사용자
 | DOCX·PDF·PPTX·XLSX 생성과 다운로드 | 성공, 파일 형식과 SHA-256 확인 |
 | 허용 목록 기반 변환 | PPTX→PDF 성공, 비허용 조합 HTTP 400 |
 | 변환 시 원본 보존 | PPTX→PDF 후 기존 `report.pdf` hash 불변 |
-| 선언적 편집 | 3개 operation 적용 성공, `runShell`과 수식 주입 HTTP 400 |
+| 선언적 편집 | DOCX·PPTX text 교체와 XLSX cell·sheet 편집 성공, `runShell`과 수식 주입 HTTP 400 |
 | 문서 입력 안전성 | Markdown형 로컬 경로·URL을 literal text로 처리, 외부·로컬 media 미삽입 |
 | XLSX 입력 안전성 | formula형 생성 입력은 text로 저장, 실패한 편집 batch는 전체 rollback |
 | Custom Container Startup/Liveness probe | pool 구성 반영 확인 |
@@ -212,7 +212,7 @@ AI Workspace 사용자
 | 승인 없는 승격 | 차단 확인 |
 | 승인 후 승격과 hash 재검증 | 성공 |
 | Session identifier 사용자 응답 비노출 | 확인 |
-| Offline 테스트 | 70개 통과 |
+| Offline 테스트 | 76개 통과 |
 
 ### 실제 모델 연결 (gpt-5.6-terra)
 
@@ -246,15 +246,33 @@ AI Workspace 사용자
 - 기존 RBAC가 있으면 재사용하고, 없을 때만 생성한다.
 - 자동 스크립트는 성공·실패와 관계없이 검증용 session을 즉시 delete/stop한다.
 
+### 2026-07-28 수정 후 Azure 재검증
+
+| 항목 | 결과 |
+| --- | --- |
+| Repository validation | Python parse와 offline 테스트 **76개 통과** |
+| Python Code Interpreter | 분석·파일·egress 차단·격리·오류 수정·이중 delete cleanup 통과 |
+| Office image | `office-sandbox:20260727224541`, digest `sha256:719165f1725599562221736110d300c40cdaf2e3aa8d61dd6eb535e5d840ed2b` |
+| Office release 확인 | `/health.release`가 기대 image tag와 일치하는 새 session에서만 검증 진행 |
+| Office 편집 | `report.edited.docx`, `report.edited.pptx`, `report.edited.xlsx` 생성·hash·ZIP·PPTX text 확인 |
+| 실제 LLM | `gpt-5.6-terra` Entra 인증으로 자연어 코드 생성·실행·승인 통과 |
+| 사용자 Gateway | Python과 Office create·download·edit·approve·delete 전체 REST 흐름 통과 |
+| 최종 session 상태 | Python 0건, Office 0건 확인 |
+| Pool 상태 | 두 pool `Succeeded`, `EgressDisabled`; Office `nodeCount=1`, ready 1, pending 0 |
+
+이 재검증에서 pool update 직후 기존 ready session이 이전 image를 한 번 더 반환할 수 있음을 확인했다. Office 배포 스크립트는 image tag를 `/health.release`와 비교하고, 이전 release session을 확인된 HTTP 응답으로 중지한 뒤 새 session으로 재시도한다.
+
 > 위 capacity 250은 당시 가용 쿼타를 실측하기 위한 과거 검증 기록이며 권장 설정이 아니다. 현재 관리자 가이드는 기존 배포를 우선 재사용하고, 새 실습 배포는 10K TPM처럼 작은 capacity부터 시작한다.
 
 > 실제 모델 검증에서 **stub으로는 재현되지 않는 버그를 발견해 고쳤다.** matplotlib·pandas 경고가 `stderr`로 출력되면서, `status`가 `Succeeded`인데도 성공한 코드를 실패로 판정해 재시도 한도를 소진했다. 성공 판정은 `stderr`가 아니라 `status`로만 해야 한다. 관리자 확인 사항은 [실습 1A §16.4](labs/01A_Python_Code_Interpreter_Admin_Lab.md#164-관리자-확인-사항)에 있다.
 
 > 역할별 가이드 재검증에서는 LLM이 `summary.json` 대신 `monthly_sales_summary.json`을 만들어도 실행 `status`만 보고 성공으로 반환하는 결함을 발견했다. 필수 산출물 이름을 prompt에 명시하고, 실행 후 누락된 파일이 있으면 제한 횟수 안에서 다시 생성하도록 수정했다.
 
-> Custom Container pool은 최소 1개의 ready session이 필요하므로 유지 비용이 발생한다. Environment, ACR, Log Analytics는 pool을 지워도 남는다. 비용 구조는 [아키텍처 10.5절](docs/AI_Workspace_Dynamic_Sessions_Reference_Architecture.md#105-비용-모델)을 확인한다.
+> Dynamic Sessions 과금은 pool 유형별로 다르다. Code Interpreter는 할당 session 시간을 1시간 단위로 과금하고, Custom Container는 active·ready session을 수용하는 전용 E16 `nodeCount` 기반이다. Environment, ACR, Log Analytics는 pool을 지워도 남을 수 있다. [아키텍처 10.5절](docs/AI_Workspace_Dynamic_Sessions_Reference_Architecture.md#105-비용-모델)을 확인한다.
 
 Production 설계 전에는 [권장 아키텍처](docs/AI_Workspace_Dynamic_Sessions_Reference_Architecture.md)에서 trust boundary와 승인 경계를 결정하고, `agent/`의 reference 구현을 실제 인증, malware·DLP 검사, 승인 UI, 최소 권한 Connector로 대체한다.
+
+현재 reference 구현은 사용자 Office/PDF 원본 업로드, PDF 페이지 편집, malware·DLP, 렌더링 미리보기·Diff와 실제 업무 Connector를 구현하지 않는다. 이 항목은 아키텍처 목표이며 Production 통합 범위다.
 
 실행 한도 테스트는 약 4분이 걸리므로 기본적으로 건너뛴다. 필요하면 다음과 같이 실행한다.
 

@@ -47,7 +47,7 @@ AI Workspace의 LLM과 Agent가 사용자의 자연어 요청을 분석하고 �
 | Office 문서 변환 | 허용 matrix 기반 LibreOffice 변환. Pandoc은 확장 후보 | [실습 2B §4](../labs/02B_Office_Custom_Container_User_Lab.md#4-변환-요청) |
 | Office 문서 편집 | 선언적 operation 허용 목록 | [실습 2B §5](../labs/02B_Office_Custom_Container_User_Lab.md#5-선언적-편집-요청) |
 | 작업별 독립 환경 | 암호학적으로 생성한 요청 또는 대화 단위 identifier | [실습 1A §13.1](../labs/01A_Python_Code_Interpreter_Admin_Lab.md#131-세션-간-격리-확인) |
-| 실행 시간·CPU·메모리 제한 | 플랫폼 강제 한도와 정책 엔진 사전 분류 | [실습 1A §13.3](../labs/01A_Python_Code_Interpreter_Admin_Lab.md#133-실행-시간과-메모리-한도) |
+| 실행 시간·CPU·메모리 제한 | Code Interpreter 한도와 Custom Container의 명시적 CPU·메모리·lifecycle 설정 | [실습 1A §13.3](../labs/01A_Python_Code_Interpreter_Admin_Lab.md#133-실행-시간과-메모리-한도), [실습 2A §9](../labs/02A_Office_Custom_Container_Admin_Lab.md#9-office-custom-container-pool) |
 | 네트워크 접근 제한 | `EgressDisabled` pool 속성 | [실습 1A §13](../labs/01A_Python_Code_Interpreter_Admin_Lab.md#13-egress-차단-확인) |
 | 허용 명령어 제한 | 정책 엔진과 Office 작업 API. 4.4.1절 참고 | [실습 1B §6](../labs/01B_Python_Code_Interpreter_User_Lab.md#6-오류-복구와-정책-거부), [실습 2B §5](../labs/02B_Office_Custom_Container_User_Lab.md#5-선언적-편집-요청) |
 | 임시 파일 자동 정리 | Timed lifecycle, cooldown, 명시적 stop/delete API | [실습 1A §14.1](../labs/01A_Python_Code_Interpreter_Admin_Lab.md#141-session-종료와-임시-파일-자동-정리) |
@@ -98,13 +98,15 @@ LLM의 판단과 별도로 결정론적인 정책을 적용한다.
 
 | 분류 | 조건 | 실행 경로 | 기본 결정 |
 | --- | --- | --- | --- |
-| A | Python 분석·계산, 220초 이하, 128MB 이하, 외부 통신 불필요 | Python pool | 허용 |
-| B | DOCX·XLSX·PPTX·PDF 생성 또는 변환 | Office pool | 허용된 API만 호출 |
-| C | 220초 초과, 128MB 초과, 대량 batch | 별도 비동기 compute | session pool에서 거부 |
-| D | 인터넷 접근 필요 | 통제 egress pool | 승인 대기 |
+| A | Python 분석·계산, Code Interpreter 실행 220초 이하, 업로드 128MB 이하, 외부 통신 불필요 | Python Code Interpreter pool | 허용 |
+| B | DOCX·XLSX·PPTX·PDF 생성·변환·편집 | Office Custom Container pool | 허용된 API만 호출 |
+| C | **Code Interpreter** 220초 또는 128MB 한도 초과, 대량 batch | Container Apps Jobs, Batch 등 별도 비동기 compute | Code Interpreter에서 거부 |
+| D | 인터넷 접근 필요 | VNet 통합 Custom Container pool 또는 backend가 대신 가져오는 brokered-fetch 경로 | 승인 대기 |
 | E | 관리자 명령, 운영 시스템 직접 변경 | 실행하지 않음 | 거부 |
 
 정책 입력에는 tenant, 사용자, 작업 유형, 파일 metadata, 예상 시간, 필요한 도구, network 요구, 데이터 분류를 포함한다.
+
+현재 reference Office Gateway는 사용자 입력 파일 업로드를 구현하지 않았다. Office route로 분류된 요청에 첨부가 있으면 형식과 무관하게 `allowed: false`로 반환하고, quarantine과 입력 upload API가 구현된 뒤에만 허용한다.
 
 ### 4.3 Session Broker
 
@@ -234,6 +236,16 @@ Custom Container가 임의 command와 shell argument를 받게 하지 않는다.
 - PPTX: placeholder 교체, slide 추가, image 배치
 - PDF: Office 원본에서 재생성, 페이지 병합·분할처럼 명시적으로 허용된 작업
 
+현재 reference 구현 범위는 다음과 같다.
+
+| 항목 | 현재 구현 | Production 추가 영역 |
+| --- | --- | --- |
+| Office 입력 | 생성된 job의 파일 | 사용자 Office/PDF 원본 업로드, quarantine, archive 검사 |
+| 편집 | DOCX·PPTX `replaceText`, XLSX `setCell`·`renameSheet` | PDF 병합·분할, 이미지 배치, slide 추가 등 명시적 operation |
+| 검사 | 파일명, 크기, magic bytes, OOXML macro, SHA-256 | malware, DLP, 렌더링 미리보기와 Diff |
+| 인증 | localhost `X-Demo-User` | Entra access token 검증과 tenant authorization |
+| 승격 | 로컬 승인 디렉터리와 hash 재검증 | Sandbox와 분리된 Approval Service 및 최소 권한 Connector |
+
 금지 항목:
 
 - 임의 executable, shell command, LibreOffice command-line argument
@@ -348,10 +360,11 @@ Broker나 LLM client는 두 규약을 모두 처리하도록 만들고, `unsuppo
 
 ### 통제 egress가 필요한 경우
 
-기본 pool을 수정하지 않고 별도 pool을 만든다.
+기본 pool을 수정하지 않고 별도 실행 경로를 만든다.
 
-- VNet 통합
-- UDR과 Azure Firewall
+- **Built-in Code Interpreter pool은 customer Container Apps Environment를 받지 않으며 pool 설정은 `EgressDisabled` 또는 `EgressEnabled`다.** FQDN allowlist가 필요한 Python 작업은 dependency와 코드를 포함한 Custom Container interpreter로 옮기거나, backend가 허용된 URL을 대신 가져와 검사 후 파일로 전달한다.
+- Custom Container pool은 workload profiles-enabled Environment를 VNet에 통합한다.
+- UDR과 Azure Firewall을 사용한다.
 - FQDN 또는 목적지 allowlist
 - DNS query와 egress traffic logging
 - 승인자, 허용 목적지, 만료 시각, request ID 기록
@@ -400,6 +413,7 @@ Broker나 LLM client는 두 규약을 모두 처리하도록 만들고, `unsuppo
 - Code Interpreter cooldown 허용 범위는 300~3600초다.
 - 작업 완료 후 즉시 용량을 회수해야 하면 delete session API를 사용한다.
 - Custom Container는 stop session management API를 사용한다.
+- Custom Container의 컨테이너가 작업 완료 후 스스로 종료해야 하는 장시간 작업은 `OnContainerExit`와 `maxAlivePeriodInSeconds`를 검토한다. 이는 Code Interpreter의 220초 실행 한도와 별개다.
 
 ### 10.3 Capacity
 
@@ -420,34 +434,44 @@ Broker나 LLM client는 두 규약을 모두 처리하도록 만들고, `unsuppo
 
 ### 10.5 비용 모델
 
-Dynamic Sessions 과금은 **할당된 session의 vCPU·메모리 사용 시간** 기준이다. 실행 중이 아니어도 session이 살아 있으면 과금된다. 이 특성이 설계에 미치는 영향이 크다.
+Dynamic Sessions는 pool 유형별 과금 방식이 다르다. 정확한 단가와 meter는 배포 시점의 [Container Apps billing](https://learn.microsoft.com/azure/container-apps/billing#dynamic-sessions)과 가격 페이지를 기준으로 확인한다.
 
 | 항목 | 과금 성격 | 통제 수단 |
 | --- | --- | --- |
-| Python pool session | 할당된 동안 사용량 과금 | cooldown 단축, 작업 후 즉시 delete session |
-| Custom Container ready session | **상시 과금.** 요청이 없어도 유지 | `ready-sessions` 최소화 |
-| Custom Container 실행 session | 할당된 동안 사용량 과금 | cooldown, stop session |
-| Container Apps Environment | workload profile 구성에 따른 고정비 | 두 pool이 환경을 공유 |
+| Code Interpreter session | 할당부터 해제까지의 실행 시간, **1시간 단위 과금** | 불필요한 session 재사용 방지, 작업 후 delete로 용량 즉시 회수 |
+| Custom Container pool | active·ready session을 수용하는 전용 **E16 compute instance** 기반 Dedicated plan 과금 | `ready-sessions`, CPU·메모리와 `nodeCount` 관측 |
+| Custom Container ready session | 요청이 없어도 pool node capacity를 점유 | `ready-sessions` 최소화 |
+| Container Apps Environment | private endpoint나 Dedicated 기능 등 구성에 따라 추가 비용 가능 | 필요한 기능만 사용 |
 | Azure Container Registry | SKU별 저장소 고정비 | Basic부터 시작 |
 | Log Analytics | 수집량과 보존 기간 | 보존 기간, 샘플링, 테이블별 필터 |
 | Azure OpenAI | 토큰 사용량 | 재시도 한도, prompt 크기 제한 |
 
-비용을 좌우하는 세 가지 결정이다.
+비용을 좌우하는 결정이다.
 
-1. **`ready-sessions` 값.** Custom Container pool은 최소 1을 요구할 수 있다(2026-07-24 한국 중부 실측). ready session은 cold start를 없애주지만 24시간 과금된다. cold start 지연을 감수할 수 있으면 최솟값을 유지한다.
-2. **cooldown 길이.** 허용 범위는 300~3600초다. 값이 크면 session 재사용률이 올라 응답이 빨라지지만 idle 과금이 늘어난다. 대화형 워크로드는 짧게, 연속 작업이 많으면 길게 잡는다.
-3. **명시적 삭제 여부.** 작업이 끝났는데 cooldown을 기다리면 그 시간만큼 낭비다. Broker가 작업 완료 시 delete/stop API를 호출하면 회수 시간이 짧아진다.
+1. **Code Interpreter session 재사용 전략.** 1시간 단위 meter를 고려해 같은 대화에서 안전하게 재사용할지, 작업마다 분리할지 보안과 비용을 함께 결정한다. delete는 즉시 용량을 회수하지만 이미 시작된 과금 단위를 초 단위로 줄이는 수단으로 가정하면 안 된다.
+2. **Custom Container `ready-sessions`와 `nodeCount`.** 한국 중부 실측에서는 ready session 최소 1이 필요했다. ready 수와 active session이 E16 node 수에 미치는 영향을 `properties.nodeCount`로 관측한다.
+3. **CPU·메모리와 lifecycle.** Custom Container는 작업 특성에 맞게 CPU·메모리를 정하고, `Timed` cooldown 또는 `OnContainerExit` 최대 수명을 사용한다.
+4. **명시적 삭제·중지.** 과금과 별개로 pool capacity와 데이터 노출 시간을 줄이기 위해 작업 완료 후 delete/stop을 호출한다.
 
 권장 통제:
 
 - tenant별 동시 session 수와 일일 실행 횟수에 상한을 둔다.
 - `max-sessions`를 실제 필요량으로 제한해 폭주 시 비용 상한을 만든다.
 - 비용 경보를 Resource Group 단위로 설정한다.
-- `PoolReadyPodCount`와 실제 실행 수를 함께 보고 ready 수를 조정한다.
+- `PoolReadyPodCount`, 실제 실행 수와 pool `nodeCount`를 함께 보고 ready 수를 조정한다.
 - 정책 분류 C·D·E에서 거부된 요청은 session을 할당하지 않으므로, 정책 엔진 자체가 비용 통제 수단이다.
 - 실습·PoC 환경은 사용 후 Resource Group 단위로 삭제한다. pool만 지우면 Environment, ACR, Log Analytics 비용이 남는다.
 
-정확한 단가는 리전과 시점에 따라 다르므로 [Container Apps 가격](https://azure.microsoft.com/pricing/details/container-apps/)과 Azure Pricing Calculator에서 확인한다. 설계 단계에서는 "ready session 수 x 24시간"을 고정비로, 나머지를 변동비로 잡고 시작한다.
+정확한 단가는 리전과 시점에 따라 다르므로 [Container Apps 가격](https://azure.microsoft.com/pricing/details/container-apps/)과 Azure Pricing Calculator에서 확인한다. 단순히 "ready session 수 x 24시간"으로 계산하지 말고, Code Interpreter 시간 meter와 Custom Container E16 `nodeCount`를 분리해 추정한다.
+
+### 10.6 가용성과 재해 복구
+
+- session과 로컬 파일은 ephemeral이며 backup 대상이 아니다. 보존이 필요한 입력과 결과는 session 밖의 staging에 둔다.
+- pool, Environment와 Agent backend는 region 장애의 영향을 받는다. Production에서는 RTO·RPO에 따라 두 번째 지원 region에 동일한 pool과 image를 준비한다.
+- Custom Container image는 두 region에서 pull할 수 있도록 ACR geo-replication 또는 region별 registry 전략을 사용한다.
+- Agent가 region별 pool health와 quota를 확인해 새 요청만 정상 region으로 라우팅한다. 실행 중이던 작업은 idempotency key와 artifact hash를 사용해 안전하게 재실행한다.
+- region failover에서 동일 session을 복구할 수 있다고 가정하지 않는다. 사용자는 새 session에서 입력을 다시 연결하고 작업을 재개한다.
+- zone redundancy와 Dynamic Sessions pool의 적용 범위는 일반 Container Apps 기능만으로 추정하지 말고 선택 region과 API version에서 Microsoft 지원 범위를 확인한다.
 
 ## 11. 모니터링과 감사
 
@@ -480,12 +504,12 @@ tenant_id
 
 ### 11.3 Custom Container Log Analytics
 
-**수집 경로에 따라 테이블 이름이 다르다.** 2026-07-25 한국 중부 실측 결과다.
+**수집 경로와 서비스 버전에 따라 테이블 이름이 달라질 수 있다.** 아래는 2026-07-25 한국 중부 실측 결과이며, 현재 Microsoft Learn에는 pool event 테이블이 `AppEnvSessionPoolEvents`로 표기된 시점도 있다.
 
 | 수집 방법 | 설정 대상 | 생성되는 테이블 |
 | --- | --- | --- |
 | `az containerapp env create --logs-destination log-analytics` | Environment 생성 시 | `AppEnvSessionConsoleLogs_CL` **하나뿐** |
-| Azure Monitor 진단 설정 | **Environment** 리소스 | `AppEnvSessionConsoleLogs`, `AppEnvSessionLifecycleLogs`, `AppEnvSessionPoolEventLogs` |
+| Azure Monitor 진단 설정 | **Environment** 리소스 | `AppEnvSessionConsoleLogs`, `AppEnvSessionLifecycleLogs`, pool event table |
 
 주의할 점이다.
 
@@ -498,9 +522,9 @@ tenant_id
 | --- | --- |
 | `AppEnvSessionConsoleLogs` | `AppEnvSessionConsoleLogs` |
 | `AppEnvSessionLifeCycleLogs` (대문자 C) | `AppEnvSessionLifecycleLogs` (소문자 c) |
-| `AppEnvSessionPoolEventLogs` | `AppEnvSessionPoolEventLogs` |
+| `AppEnvSessionPoolEventLogs` | 실측 `AppEnvSessionPoolEventLogs`, 문서 표기 `AppEnvSessionPoolEvents` 가능 |
 
-- `AppEnvSessionPoolEvents`나 `*_CL` 접미사를 붙인 lifecycle·pool event 테이블은 **존재하지 않는다.** 잘못된 이름은 KQL `SemanticError`로 실패한다.
+- table 이름을 고정하기 전에 `search * | summarize by $table`로 실제 workspace schema를 확인한다.
 - 진단 설정 후 첫 수집까지 2~5분 걸린다.
 
 ```kusto
@@ -518,7 +542,7 @@ AppEnvSessionLifecycleLogs
 ```
 
 ```kusto
-AppEnvSessionPoolEventLogs
+union isfuzzy=true AppEnvSessionPoolEventLogs, AppEnvSessionPoolEvents
 | where TimeGenerated > ago(1h)
 | project TimeGenerated, SessionPoolName, OperationName, Log
 | order by TimeGenerated desc
@@ -577,17 +601,18 @@ Custom Container session pool 주요 metric:
 | 제약 | 실측 동작 | 대응 |
 | --- | --- | --- |
 | Code Interpreter 실행당 최대 220초 | 221.5초에 `status: Failed`, `Request timed out waiting for code execution to complete` | 작업 분할 또는 별도 비동기 compute |
-| 실행 메모리 한도 | 무한 할당 시 `status: Failed`, `Execution aborted` | 데이터 분할 처리, chunk 단위 집계 |
-| 파일 업로드당 최대 128MB | 초과 시 HTTP 413 | 사전 검사, 분할 또는 staging |
+| Code Interpreter 실행 메모리 한도 | 무한 할당 시 `status: Failed`, `Execution aborted` | 정확한 고정값을 가정하지 말고 데이터 분할 처리 |
+| Code Interpreter 파일 업로드당 최대 128MB | 초과 시 HTTP 413 | 사전 검사, 분할 또는 별도 staging |
+| Reference Python Gateway 전체 multipart 최대 129MB | HTTP body와 MIME overhead를 포함한 애플리케이션 한도 | 플랫폼의 파일별 128MB 한도와 별도로 문서화·설정 |
 | 실패해도 HTTP는 200 | 실행 실패가 `status`와 `result.stderr`에만 나타남 | 호출부가 HTTP 코드만 보지 말고 `status`를 반드시 확인 |
 | Session은 영구 저장소가 아님 | 삭제 후 목록 비고 다운로드 404 | Artifact Staging으로 명시적 이동 |
-| Preview API shape와 version 변경 | `properties` 래퍼 사용 시 `SessionPropertiesMissing` | version 고정, 실제 통합 테스트, canary |
+| Preview API shape와 version 변경 | 한국 중부 실측은 top-level 속성, 공식 예제는 `properties` wrapper를 사용하는 시점이 있음 | version 고정, 두 shape 호환 client, 실제 통합 테스트와 canary |
 | Built-in runtime library 제한 | 4.4절 목록이 사용 가능 범위 | dependency가 필요하면 Custom Container |
 | EgressDisabled에서 package 설치 불가 | `pip install` 실패 | dependency를 image에 포함 |
 | Python pool에서 shell 실행 가능 | `subprocess` 자체는 막히지 않음 | 4.4.1절대로 외부 영향 차단으로 통제 |
 | Office 변환 fidelity | LibreOffice 렌더링 차이 | 표준 문서 회귀 테스트, font 고정 |
 | Macro·embedded object 위험 | - | 기본 거부 또는 제거 |
-| Custom ready session 비용 | ready sessions 최소 1 필요 (한국 중부 실측) | 최소 ready count, 사용량 관측 |
+| Custom ready session 비용 | ready sessions 최소 1 필요 (한국 중부 실측) | 최소 ready count와 E16 `nodeCount` 관측 |
 | Code Interpreter logging 차이 | console log 테이블 없음 | 실행 API 응답을 AI Workspace가 직접 보관 |
 | Region·quota 차이 | - | 배포 전 quota와 실제 provisioning 검증 |
 
@@ -601,7 +626,7 @@ Dynamic Sessions가 항상 정답은 아니다. 요건에 맞는 선택 근거�
 | session 할당 지연 | 밀리초~초 (ready session 사용 시) | 수십 초 | 수 초~수십 초 | 밀리초 (cold start 있음) |
 | 요청 단위 수명주기 | **API로 생성·삭제. 자동 정리 내장** | 직접 생성·삭제 관리 | 직접 관리 | 무상태 |
 | 세션별 임시 파일 공간 | **`/mnt/data` 기본 제공** | 볼륨 직접 구성 | PVC 직접 구성 | 임시 저장만 |
-| 실행 시간 한도 | 실행당 220초 | 제한 없음 | 제한 없음 | plan에 따라 다름 |
+| 실행 시간 한도 | Code Interpreter 실행당 220초. Custom Container는 lifecycle과 application timeout을 별도 설계 | 제한 없음 | 제한 없음 | plan에 따라 다름 |
 | 운영 부담 | 낮음 | 중간 | **높음** | 낮음 |
 | custom 런타임 | Custom Container pool | 자유 | 자유 | custom handler |
 | 적합한 경우 | **LLM 생성 코드의 대화형 실행** | 장시간 단발 배치 | 대규모 상시 워크로드 | 이벤트 기반 짧은 함수 |
@@ -613,7 +638,7 @@ Dynamic Sessions가 항상 정답은 아니다. 요건에 맞는 선택 근거�
 3. 요건이 "신뢰할 수 없는 AI 생성 코드 실행"인데 Hyper-V 격리가 기본이다.
 4. 요건이 "네트워크 접근 제한"인데 `EgressDisabled`가 pool 속성이다.
 
-다만 **220초를 초과하거나 128MB를 넘는 작업은 Dynamic Sessions로 처리하지 않는다.** 정책 분류 C가 그 경계이며, 이런 작업은 Container Apps Jobs나 Batch로 라우팅한다. 즉 두 경로를 함께 설계하는 것이 현실적인 구성이다.
+다만 **Code Interpreter에서** 220초를 초과하거나 단일 파일이 128MB를 넘는 작업은 Container Apps Jobs나 Batch로 라우팅한다. Custom Container는 같은 숫자를 공통 한도로 사용하지 않으며 CPU·메모리, request size, application timeout과 lifecycle을 별도로 제한한다.
 
 ## 14. 운영 사례
 
@@ -631,11 +656,11 @@ Office pool의 제한된 `/generate` API가 DOCX, PDF, PPTX와 XLSX를 만든다
 
 ### 사례 D: 외부 URL 요청
 
-기본 pool에서는 차단한다. business justification과 승인자가 있는 경우에만 만료 시간이 설정된 통제 egress pool로 라우팅한다.
+기본 pool에서는 차단한다. business justification과 승인자가 있는 경우 Custom Container 기반 통제 egress pool 또는 backend brokered-fetch 경로로 라우팅한다. Built-in Code Interpreter에 FQDN allowlist가 있다고 가정하지 않는다.
 
 ### 사례 E: 대형·장시간 작업
 
-128MB 또는 220초를 초과할 가능성이 있으면 session pool에서 실행하지 않는다. batch, job 또는 별도 compute로 라우팅한다.
+Code Interpreter의 128MB 또는 220초 한도를 초과할 가능성이 있으면 batch, job 또는 별도 compute로 라우팅한다. Custom Container 작업은 별도의 CPU·메모리·request size·최대 수명 정책으로 판단한다.
 
 ### 사례 F: 최종 반영
 
@@ -686,8 +711,9 @@ Office 변환·편집, CJK 폰트 고정 또는 도구 버전 고정이 필요�
 - [ ] 정책 엔진이 LLM보다 먼저 실행되는지 확인
 - [ ] 승인 없는 승격이 불가능한지 테스트로 확인
 - [ ] session identifier가 사용자 응답과 client log에 없는지 확인
-- [ ] ready session 상시 비용과 경보 설정
-- [ ] 220초·128MB 초과 요청의 대체 경로 확보
+- [ ] Code Interpreter 시간 meter와 Custom Container E16 `nodeCount` 비용 경보 설정
+- [ ] Code Interpreter 220초·128MB 초과 요청의 대체 경로 확보
+- [ ] region 장애 시 다중 region pool, image 복제, idempotent 재실행 계획
 
 ## 17. 공식 참고 자료
 

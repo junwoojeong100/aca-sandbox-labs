@@ -132,6 +132,7 @@ az acr build \
   --registry "$ACR_NAME" \
   --image "$IMAGE_REPOSITORY:$IMAGE_TAG" \
   --file "$REPO_ROOT/office-container/Dockerfile" \
+  --build-arg "BUILD_VERSION=$IMAGE_TAG" \
   --no-logs \
   "$REPO_ROOT/office-container" \
   --output none
@@ -208,21 +209,31 @@ ENDPOINT=$(az containerapp sessionpool show \
   --output tsv)
 SESSION_ID="office-$(python3 -c 'import uuid; print(uuid.uuid4())')"
 
-cleanup_main_session() {
-  local token
-  token=$(az account get-access-token \
-    --resource https://dynamicsessions.io \
-    --query accessToken --output tsv 2>/dev/null) || {
-      log "WARNING: Office validation session token을 얻지 못해 자동 정리를 건너뜁니다."
-      return
-    }
-  curl --silent --show-error --output /dev/null \
-    --request POST \
-    "$ENDPOINT/.management/stopSession?api-version=$SESSION_API_VERSION&identifier=$SESSION_ID" \
-    --header "Authorization: Bearer $token" \
-    || log "WARNING: Office validation session 자동 정리에 실패했습니다: $SESSION_ID"
+stop_office_session() {
+  local identifier=$1
+  local token http
+  for attempt in $(seq 1 6); do
+    token=$(az account get-access-token \
+      --resource https://dynamicsessions.io \
+      --query accessToken --output tsv 2>/dev/null) || return 1
+    http=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+      --request POST \
+      "$ENDPOINT/.management/stopSession?api-version=$SESSION_API_VERSION&identifier=$identifier" \
+      --header "Authorization: Bearer $token")
+    if [[ "$http" == "200" || "$http" == "202" || "$http" == "204" || "$http" == "404" ]]; then
+      sleep 5
+      http=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+        --request POST \
+        "$ENDPOINT/.management/getSession?api-version=$SESSION_API_VERSION&identifier=$identifier" \
+        --header "Authorization: Bearer $token")
+      [[ "$http" == "400" || "$http" == "404" ]] && return 0
+    fi
+    sleep 5
+  done
+  return 1
 }
-trap cleanup_main_session EXIT
+
+trap 'stop_office_session "$SESSION_ID" || log "WARNING: Office validation session 자동 정리에 실패했습니다: $SESSION_ID"' EXIT
 
 http=
 for attempt in $(seq 1 30); do
@@ -233,7 +244,22 @@ for attempt in $(seq 1 30); do
     --write-out '%{http_code}' \
     "$ENDPOINT/health?identifier=$SESSION_ID" \
     --header "Authorization: Bearer $TOKEN")
-  [[ "$http" == "200" ]] && break
+  if [[ "$http" == "200" ]]; then
+    release=$(jq -r '.release // "legacy"' "$WORK_DIR/health.json")
+    if [[ "$release" == "$IMAGE_TAG" ]]; then
+      break
+    fi
+    log "Allocated session uses release $release; waiting for $IMAGE_TAG."
+    stop_office_session "$SESSION_ID" \
+      || die "Previous Office release session could not be stopped: $SESSION_ID"
+    curl --silent --show-error --output /dev/null \
+      --request POST \
+      "$ENDPOINT/.management/stopSession?api-version=$SESSION_API_VERSION&identifier=$SESSION_ID" \
+      --header "Authorization: ******" || true
+    SESSION_ID="office-$(python3 -c 'import uuid; print(uuid.uuid4())')"
+    sleep 20
+    continue
+  fi
   if [[ "$http" == "403" || "$http" == "502" || "$http" == "503" ]]; then
     sleep 20
     continue
@@ -242,6 +268,8 @@ for attempt in $(seq 1 30); do
 done
 [[ "$http" == "200" ]] || die "Office health did not become ready"
 jq -e '.status == "ok"' "$WORK_DIR/health.json" >/dev/null
+jq -e --arg release "$IMAGE_TAG" '.release == $release' \
+  "$WORK_DIR/health.json" >/dev/null
 
 http=$(curl --silent --show-error --output "$WORK_DIR/generate.json" \
   --write-out '%{http_code}' \
@@ -368,10 +396,13 @@ http=$(curl --silent --show-error --output "$WORK_DIR/edit.json" \
     {\"op\":\"replaceText\",\"find\":\"separate isolated pools\",\"replace\":\"검토 완료\"}
   ]}")
 expect_2xx "$http" "Office edit" "$WORK_DIR/edit.json"
-jq -e '.applied == 3 and (.files | length) == 2' "$WORK_DIR/edit.json" >/dev/null \
+jq -e '.applied == 3 and (.files | length) == 3' "$WORK_DIR/edit.json" >/dev/null \
   || die "Edit did not apply the expected operations"
 
-for file_name in report.edited.docx report.edited.xlsx; do
+for file_name in \
+  report.edited.docx \
+  report.edited.pptx \
+  report.edited.xlsx; do
   download_path=$(jq -r --arg name "$file_name" \
     '.files[] | select(.name == $name) | .downloadPath' "$WORK_DIR/edit.json")
   expected_hash=$(jq -r --arg name "$file_name" \
@@ -385,6 +416,10 @@ for file_name in report.edited.docx report.edited.xlsx; do
     || die "Hash mismatch: $file_name"
   unzip -t "$WORK_DIR/$file_name" >/dev/null
 done
+
+unzip -p "$WORK_DIR/report.edited.pptx" 'ppt/slides/slide*.xml' \
+  | grep -q '검토 완료' \
+  || die "PPTX replaceText was not applied"
 
 # 존재하지 않는 job은 404다.
 http=$(curl --silent --show-error --output /dev/null \
@@ -436,6 +471,10 @@ done
 [[ "$logs_found" == "true" ]] \
   || die "No session logs were ingested into Log Analytics"
 
+stop_office_session "$SESSION_ID" \
+  || die "Office validation session cleanup failed: $SESSION_ID"
+trap - EXIT
+
 cat > "$WORK_DIR/validation.txt" <<EOF
 pool=$OFFICE_POOL_NAME
 image=$IMAGE
@@ -444,6 +483,7 @@ formats=docx,pdf,pptx,xlsx
 hashes=verified
 convert_allowlist=enforced
 edit_allowlist=enforced
+session_cleanup=verified
 EOF
 
 log "Office validation passed."

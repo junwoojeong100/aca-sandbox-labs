@@ -125,6 +125,34 @@ class PythonGatewayServiceTests(unittest.TestCase):
             )
         self.assertEqual(context.exception.status, 400)
 
+    def test_attachment_limit_is_checked_per_file(self) -> None:
+        original = service.MAX_ATTACHMENT_BYTES
+        service.MAX_ATTACHMENT_BYTES = 3
+        try:
+            with self.assertRaises(service.GatewayError) as context:
+                service.PythonGatewayService._validate_inputs(
+                    "analyze",
+                    {"large.csv": b"1234"},
+                    (),
+                )
+        finally:
+            service.MAX_ATTACHMENT_BYTES = original
+        self.assertEqual(context.exception.status, 413)
+
+    def test_total_attachment_limit_is_an_explicit_gateway_limit(self) -> None:
+        original = service.MAX_TOTAL_ATTACHMENT_BYTES
+        service.MAX_TOTAL_ATTACHMENT_BYTES = 5
+        try:
+            with self.assertRaises(service.GatewayError) as context:
+                service.PythonGatewayService._validate_inputs(
+                    "compare",
+                    {"a.csv": b"123", "b.csv": b"456"},
+                    (),
+                )
+        finally:
+            service.MAX_TOTAL_ATTACHMENT_BYTES = original
+        self.assertEqual(context.exception.status, 413)
+
     def test_download_and_approve_same_staged_artifact(self) -> None:
         result = self.create_job()
         public_id = str(result["id"])

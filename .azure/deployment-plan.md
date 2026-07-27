@@ -71,7 +71,6 @@ Deployed and Verified
 
 - `bash scripts/check-prereqs.sh`
 - `bash scripts/validate-repo.sh`
-- `bash scripts/smoke-office-local.sh`
 - `ensure_role_assignment` existing-role and missing-role branch checks
 - Azure subscription and Resource Group lookup
 - Existing session pool and resource inventory
@@ -80,25 +79,58 @@ Deployed and Verified
 - Session Executor and AcrPull live role verification
 - Bicep/template validation: Not applicable; this repository uses existing Azure CLI deployment scripts
 
+### 2026-07-28 Validation Proof
+
+- `bash scripts/check-prereqs.sh`: Azure CLI 2.86.0, target subscription and login valid
+- `bash scripts/validate-repo.sh`: Python sources parsed and 76 offline tests passed
+- `bash -n scripts/*.sh`: all deployment and validation scripts parsed
+- `python3 -m compileall -q ...`: Python packages and Office server compiled
+- Local Docker smoke: not run because Docker Desktop daemon is unavailable; ACR cloud build and live Custom Container session validation are required deployment gates
+- Resource Group `rg-ai-workspace-sandbox-lab`: `Succeeded`, Korea Central
+- Python and Office session pools: `Succeeded`
+- Office pool: `EgressDisabled`, ready sessions 1, max sessions 5, node count 1, Startup and Liveness probes
+- Regional quota: Session pools 48 available, managed environments 48 available
+- Live RBAC: Session Executor on both pools and AcrPull on the ACR
+- ACR admin user: disabled
+- Session diagnostic categories: console, lifecycle, and pool event logs available
+- Azure MCP resource lookup used a different Entra context and returned 403; deployment validation uses the authenticated Azure CLI context recorded in this plan
+
 ### Results
 
 - Azure CLI `2.86.0`
 - Confirmed subscription and `koreacentral`
 - Repository validation passed
-- 70 offline tests passed
-- Local Office container build and smoke test passed
+- 76 offline tests passed
 - Both existing session pools are `Succeeded`
 - Regional quota: managed environments 48 available, session pools 48 available
 - Session Executor exists on both pools; AcrPull exists on ACR
 - Existing role reuse and missing role creation branches passed
 - Python live validation passed
 - Python timeout and memory limit probes passed
-- Office image `aiws5153160423374c05bc05.azurecr.io/office-sandbox:20260725120350` deployed and validated
+- Office image `aiws5153160423374c05bc05.azurecr.io/office-sandbox:20260727224541` deployed and validated
 - Live `gpt-5.6-terra` orchestration passed with Entra authentication
 - Python and Office user Gateway REST flows passed
 - Temporary validation sessions were stopped
 - Python session list confirmed zero remaining sessions after trap cleanup
 - No destructive action was performed
+
+### 2026-07-28 Deployment and Live Verification
+
+- ACR cloud build run `dee`: succeeded
+- Deployed image: `aiws5153160423374c05bc05.azurecr.io/office-sandbox:20260727224541`
+- Image digest: `sha256:719165f1725599562221736110d300c40cdaf2e3aa8d61dd6eb535e5d840ed2b`
+- Office pool update: `Succeeded`; `EgressDisabled`, ready sessions 1, max sessions 5, node count 1
+- Release marker: `/health.release == 20260727224541`
+- Office live validation: four-format generation, allowlisted conversion, DOCX/PPTX/XLSX editing, hash, logs, metrics, and session stop passed
+- Python live validation: execution, upload/download, egress block, session isolation, error correction, and cleanup passed
+- Actual LLM validation: `gpt-5.6-terra` with Entra authentication passed
+- Python user Gateway: natural language + CSV, download, approve, and delete passed
+- Office user Gateway: create, edit, PPTX download, approve, and delete passed
+- Cleanup regression: Python delete-after-read and Office stop verification fixed and reproduced
+- Final active sessions: Python 0, Office 0
+- Final RBAC: Session Executor on both pools; AcrPull on the ACR
+- Final repository validation: 76 tests passed
+- Git commit and push: intentionally not performed
 
 ### Deployed Endpoints
 

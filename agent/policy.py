@@ -11,8 +11,9 @@ import re
 from dataclasses import dataclass, field
 from enum import Enum
 
-MAX_EXECUTION_SECONDS = 220
-MAX_UPLOAD_BYTES = 128 * 1024 * 1024
+CODE_INTERPRETER_MAX_EXECUTION_SECONDS = 220
+CODE_INTERPRETER_MAX_UPLOAD_BYTES = 128 * 1024 * 1024
+REFERENCE_MAX_TOTAL_ATTACHMENT_BYTES = 128 * 1024 * 1024
 
 OFFICE_KEYWORDS = (
     "docx",
@@ -86,7 +87,7 @@ class PolicyInput:
     user_id: str
     request_text: str
     attachment_names: tuple[str, ...] = ()
-    attachment_bytes: int = 0
+    attachment_sizes: tuple[int, ...] = ()
     estimated_seconds: int = 30
     data_classification: str = "internal"
 
@@ -123,8 +124,6 @@ def classify(request: PolicyInput) -> PolicyDecision:
     """요청을 A~E로 분류한다. 순서가 곧 우선순위다."""
     base_controls: dict[str, object] = {
         "network": "EgressDisabled",
-        "maxExecutionSeconds": MAX_EXECUTION_SECONDS,
-        "maxUploadBytes": MAX_UPLOAD_BYTES,
         "maxCodeRetries": 2,
         "writeToBusinessSystem": False,
     }
@@ -139,53 +138,100 @@ def classify(request: PolicyInput) -> PolicyDecision:
             controls=base_controls,
         )
 
-    if request.attachment_bytes > MAX_UPLOAD_BYTES:
-        return PolicyDecision(
-            classification="C",
-            route=Route.ASYNC_COMPUTE,
-            allowed=False,
-            reason=(
-                f"첨부 크기 {request.attachment_bytes} bytes가 "
-                f"session 업로드 한도 {MAX_UPLOAD_BYTES} bytes를 초과"
-            ),
-            controls=base_controls,
-        )
-
-    if request.estimated_seconds > MAX_EXECUTION_SECONDS:
-        return PolicyDecision(
-            classification="C",
-            route=Route.ASYNC_COMPUTE,
-            allowed=False,
-            reason=(
-                f"예상 실행 {request.estimated_seconds}초가 "
-                f"실행당 한도 {MAX_EXECUTION_SECONDS}초를 초과"
-            ),
-            controls=base_controls,
-        )
-
     network_hit = _contains(request.request_text, NETWORK_KEYWORDS)
     if network_hit:
+        controls = dict(base_controls)
+        controls["requiresCustomContainer"] = True
+        controls["egressControl"] = "VNet-UDR-Firewall"
         return PolicyDecision(
             classification="D",
             route=Route.CONTROLLED_EGRESS,
             allowed=False,
             reason=f"인터넷 접근이 필요한 요청: {network_hit}. 승인 대기",
-            controls=base_controls,
+            controls=controls,
         )
 
     office_hit = _contains(request.request_text, OFFICE_KEYWORDS) or any(
         name.lower().endswith((".docx", ".xlsx", ".pptx", ".pdf"))
         for name in request.attachment_names
     )
+    if office_hit and request.attachment_names:
+        controls = dict(base_controls)
+        controls["runtime"] = "custom-container"
+        controls["inputUploadImplemented"] = False
+        controls["allowedOperations"] = ["generate", "convert", "edit"]
+        return PolicyDecision(
+            classification="B",
+            route=Route.OFFICE_POOL,
+            allowed=False,
+            reason=(
+                "Reference Office Gateway는 사용자 입력 파일 업로드를 "
+                "아직 지원하지 않는다"
+            ),
+            controls=controls,
+        )
+
     if office_hit:
         controls = dict(base_controls)
-        controls["allowedOperations"] = ["generate", "convert"]
+        controls["runtime"] = "custom-container"
+        controls["allowedOperations"] = ["generate", "convert", "edit"]
         return PolicyDecision(
             classification="B",
             route=Route.OFFICE_POOL,
             allowed=True,
-            reason="Office 문서 생성 또는 변환 요청",
+            reason="Office 문서 생성, 변환 또는 편집 요청",
             controls=controls,
+        )
+
+    largest_attachment = max(request.attachment_sizes, default=0)
+    python_controls = dict(base_controls)
+    python_controls["runtime"] = "code-interpreter"
+    python_controls[
+        "maxExecutionSeconds"
+    ] = CODE_INTERPRETER_MAX_EXECUTION_SECONDS
+    python_controls["maxUploadBytesPerFile"] = CODE_INTERPRETER_MAX_UPLOAD_BYTES
+    python_controls[
+        "maxTotalAttachmentBytes"
+    ] = REFERENCE_MAX_TOTAL_ATTACHMENT_BYTES
+
+    if largest_attachment > CODE_INTERPRETER_MAX_UPLOAD_BYTES:
+        return PolicyDecision(
+            classification="C",
+            route=Route.ASYNC_COMPUTE,
+            allowed=False,
+            reason=(
+                f"가장 큰 첨부 크기 {largest_attachment} bytes가 "
+                "Code Interpreter 파일별 업로드 한도 "
+                f"{CODE_INTERPRETER_MAX_UPLOAD_BYTES} bytes를 초과"
+            ),
+            controls=python_controls,
+        )
+
+    total_attachment_bytes = sum(request.attachment_sizes)
+    if total_attachment_bytes > REFERENCE_MAX_TOTAL_ATTACHMENT_BYTES:
+        return PolicyDecision(
+            classification="C",
+            route=Route.ASYNC_COMPUTE,
+            allowed=False,
+            reason=(
+                f"첨부 전체 크기 {total_attachment_bytes} bytes가 "
+                "Reference Gateway 요청 body 한도 "
+                f"{REFERENCE_MAX_TOTAL_ATTACHMENT_BYTES} bytes를 초과"
+            ),
+            controls=python_controls,
+        )
+
+    if request.estimated_seconds > CODE_INTERPRETER_MAX_EXECUTION_SECONDS:
+        return PolicyDecision(
+            classification="C",
+            route=Route.ASYNC_COMPUTE,
+            allowed=False,
+            reason=(
+                f"예상 실행 {request.estimated_seconds}초가 "
+                "Code Interpreter 실행당 한도 "
+                f"{CODE_INTERPRETER_MAX_EXECUTION_SECONDS}초를 초과"
+            ),
+            controls=python_controls,
         )
 
     return PolicyDecision(
@@ -193,7 +239,7 @@ def classify(request: PolicyInput) -> PolicyDecision:
         route=Route.PYTHON_POOL,
         allowed=True,
         reason="범용 Python 분석·계산 요청",
-        controls=base_controls,
+        controls=python_controls,
     )
 
 

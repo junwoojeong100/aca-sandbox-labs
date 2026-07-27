@@ -17,7 +17,7 @@ LibreOffice, Pandoc, Poppler와 폰트를 포함한 비루트 Custom Container i
 
 예상 시간은 60~120분이며 ACR build 시간은 별도다.
 
-> Custom Container pool은 ready session을 최소 1개 요구할 수 있다. 유지되는 동안 비용이 발생한다. 이 실습은 Container Apps Environment, ACR, Log Analytics도 만들며 이들은 pool을 삭제해도 남는다. 비용 상세는 [권장 아키텍처 10.5절](../docs/AI_Workspace_Dynamic_Sessions_Reference_Architecture.md#105-비용-모델)을 참고하고, 실습 후에는 17절의 정리 절차를 검토한다.
+> Custom Container pool은 ready session을 최소 1개 요구할 수 있다. Custom Container는 active·ready session을 수용하는 전용 E16 `nodeCount` 기반 Dedicated plan으로 과금된다. 이 실습은 Container Apps Environment, ACR, Log Analytics도 만들며 이들은 pool을 삭제해도 남는다. 비용 상세는 [권장 아키텍처 10.5절](../docs/AI_Workspace_Dynamic_Sessions_Reference_Architecture.md#105-비용-모델)을 참고하고, 실습 후에는 17절의 정리 절차를 검토한다.
 
 이 문서는 관리자가 Custom Container, ACR, identity, environment, pool, monitoring과 비용 통제를 구성·검증하는 절차다. 생성·변환·편집 중심의 사용자 실습은 [실습 2B](02B_Office_Custom_Container_User_Lab.md)에서 수행한다.
 
@@ -37,7 +37,7 @@ LibreOffice, Pandoc, Poppler와 폰트를 포함한 비루트 Custom Container i
 
 즉 Custom Container의 가치는 "Office 파일을 만든다"가 아니라 **"변환 fidelity와 도구 버전을 통제한다"** 에 있다. 이 구분을 먼저 정리해야 불필요한 ready session 비용을 피할 수 있다.
 
-이 실습의 reference API는 네 형식의 **생성**, 허용 목록 기반 Office→PDF·TXT **변환**, 선언적 **편집**을 검증한다. Image에는 Pandoc이 포함돼 있지만 Markdown·HTML 변환 endpoint는 구현하지 않았다. 임의 shell을 노출하지 않고 [권장 아키텍처의 Office 작업 API](../docs/AI_Workspace_Dynamic_Sessions_Reference_Architecture.md#47-office-작업-api)가 정의한 경계를 따른다.
+이 실습의 reference API는 네 형식의 **생성**, 허용 목록 기반 Office→PDF·TXT **변환**, DOCX·PPTX text와 XLSX cell·sheet의 선언적 **편집**을 검증한다. Image에는 Pandoc이 포함돼 있지만 Markdown·HTML 변환 endpoint는 구현하지 않았다. 사용자 Office/PDF 원본 업로드와 PDF 페이지 편집도 Production 확장 영역이다. 임의 shell을 노출하지 않고 [권장 아키텍처의 Office 작업 API](../docs/AI_Workspace_Dynamic_Sessions_Reference_Architecture.md#47-office-작업-api)가 정의한 경계를 따른다.
 
 ## 1. 사전 조건
 
@@ -440,6 +440,7 @@ cat health.json
 ```json
 {
   "status": "ok",
+  "release": "20260728123456",
   "tools": {
     "libreoffice": "LibreOffice ...",
     "openpyxl": "3.1.5",
@@ -469,6 +470,7 @@ cat health.json
 ```
 
 `operations`가 AI Workspace Agent에 노출되는 계약이다. Agent는 이 목록 밖의 작업을 요청할 수 없고, shell command나 LibreOffice argument를 직접 전달할 수도 없다.
+`release`는 pool update 직후 이전 ready session이 남아 있는지 확인하는 image release marker다. 자동 스크립트는 기대한 image tag와 일치하는 session이 할당될 때까지 이전 session을 중지하고 재시도한다.
 
 ## 12. DOCX, PDF, PPTX와 XLSX 생성
 
@@ -667,7 +669,7 @@ cat edit.json
 편집 결과를 내려받아 확인한다.
 
 ```bash
-for FILE_NAME in report.edited.docx report.edited.xlsx; do
+for FILE_NAME in report.edited.docx report.edited.pptx report.edited.xlsx; do
   DOWNLOAD_PATH=$(jq -r --arg name "$FILE_NAME" \
     '.files[] | select(.name == $name) | .downloadPath' edit.json)
   EXPECTED_HASH=$(jq -r --arg name "$FILE_NAME" \
@@ -687,11 +689,11 @@ done
 | --- | --- |
 | `{"op":"runShell","cmd":"id"}` | HTTP 400, 허용 목록 반환 |
 | `{"op":"setCell","value":"=1+1"}` | HTTP 400, 수식 거부 |
-| 허용된 operation 3개 | HTTP 200, `applied: 3`, 파일 2개 |
+| 허용된 operation 3개 | HTTP 200, `applied: 3`, 파일 3개 |
 | 존재하지 않는 `jobId` | HTTP 404 |
 | 편집 결과 다운로드 | HTTP 200, hash 일치, ZIP 구조 정상 |
 
-원본은 유지되고 편집 결과는 `report.edited.docx`, `report.edited.xlsx`로 따로 생성된다. 원본 보존은 Diff와 승인 심사에 필요하다.
+원본은 유지되고 편집 결과는 `report.edited.docx`, `report.edited.pptx`, `report.edited.xlsx`로 따로 생성된다. 원본 보존은 Diff와 승인 심사에 필요하다.
 
 설계 원칙:
 
@@ -715,12 +717,12 @@ curl --fail-with-body --silent --show-error \
 
 ### 15.1 로그 수집 경로 두 가지
 
-세션 로그는 **어떻게 수집하느냐에 따라 테이블 이름이 다르다.** 이 차이 때문에 KQL이 `SemanticError`로 실패하는 일이 흔하다.
+세션 로그는 **수집 경로와 서비스 버전에 따라 테이블 이름이 다를 수 있다.** 이 차이 때문에 KQL이 `SemanticError`로 실패하는 일이 흔하다.
 
 | 수집 방법 | 설정 위치 | 얻는 테이블 |
 | --- | --- | --- |
 | Environment 로그 대상 (`--logs-destination log-analytics`) | 7절에서 이미 설정함 | `AppEnvSessionConsoleLogs_CL` **하나뿐** |
-| Azure Monitor 진단 설정 (resource-specific) | Environment 리소스 | `AppEnvSessionConsoleLogs`, `AppEnvSessionLifecycleLogs`, `AppEnvSessionPoolEventLogs` |
+| Azure Monitor 진단 설정 (resource-specific) | Environment 리소스 | `AppEnvSessionConsoleLogs`, `AppEnvSessionLifecycleLogs`, pool event table |
 
 > **7절 설정만으로는 lifecycle과 pool event 로그를 볼 수 없다.** console 로그만 `_CL` 테이블로 들어온다. 나머지 두 종류는 진단 설정을 따로 만들어야 한다.
 
@@ -763,7 +765,7 @@ AppEnvSessionPoolEventLogs
 AppEnvSessionLifeCycleLogs
 ```
 
-> ⚠️ 카테고리 이름과 테이블 이름의 대소문자가 다르다. 카테고리는 `AppEnvSession**LifeCycle**Logs`(대문자 C)인데 테이블은 `AppEnvSession**Lifecycle**Logs`(소문자 c)다. 카테고리 이름을 그대로 KQL에 쓰면 실패한다.
+> ⚠️ 카테고리 이름과 테이블 이름의 대소문자가 다르다. 카테고리는 `AppEnvSession**LifeCycle**Logs`(대문자 C)인데 lifecycle 테이블은 `AppEnvSession**Lifecycle**Logs`(소문자 c)다. Pool event 테이블은 한국 중부 실측에서 `AppEnvSessionPoolEventLogs`, 현재 Microsoft Learn의 일부 문서에서는 `AppEnvSessionPoolEvents`로 표기된다.
 
 진단 설정을 만든다. **필요한 것은 카테고리 3개를 켜는 것뿐이다.**
 
@@ -838,7 +840,7 @@ AppEnvSessionLifecycleLogs
 
 ```kusto
 // 진단 설정(resource-specific)으로 수집한 pool event
-AppEnvSessionPoolEventLogs
+union isfuzzy=true AppEnvSessionPoolEventLogs, AppEnvSessionPoolEvents
 | where TimeGenerated > ago(1h)
 | project TimeGenerated, SessionPoolName, OperationName, Log
 | order by TimeGenerated desc
@@ -922,7 +924,7 @@ az monitor metrics list \
 
 | 리소스 | pool 삭제 후에도 남는가 | 비용 성격 |
 | --- | --- | --- |
-| Custom Container session pool | 아니오 | ready session 1개가 상시 과금 |
+| Custom Container session pool | 아니오 | active·ready session을 수용하는 E16 `nodeCount` 기반 과금 |
 | Container Apps Environment | 예 | workload profile 구성에 따라 고정비 발생 가능 |
 | Azure Container Registry (Basic) | 예 | 저장소 고정비 |
 | Log Analytics workspace | 예 | 수집량과 보존 기간 과금 |
@@ -1027,4 +1029,17 @@ az group delete --name "$RESOURCE_GROUP" --yes --no-wait
 | §15 metrics | 세 metric 조회 성공 |
 | §15 KQL 3종 | 진단 설정 후 세 테이블 모두 데이터 반환 |
 
-> 이 검증에서 문서 오류 두 건을 발견해 고쳤다. 첫째, KQL 테이블 이름이 틀렸다(`AppEnvSessionPoolEvents`, `AppEnvSessionLifecycleLogs_CL`은 존재하지 않는다). 둘째, lifecycle·pool event 로그는 Environment 로그 대상 설정만으로는 수집되지 않고 **별도 진단 설정**이 필요하다는 사실이 빠져 있었다. 15.1~15.2절이 이를 다룬다.
+> 이 검증에서 문서 오류 두 건을 발견해 고쳤다. 첫째, 당시 workspace에서 `AppEnvSessionPoolEvents`, `AppEnvSessionLifecycleLogs_CL`은 존재하지 않았다. 다만 pool event table 이름은 서비스·문서 버전에 따라 달라질 수 있으므로 현재 가이드는 `search *`와 `union isfuzzy=true`를 사용한다. 둘째, lifecycle·pool event 로그는 Environment 로그 대상 설정만으로는 수집되지 않고 **별도 진단 설정**이 필요했다. 15.1~15.2절이 이를 다룬다.
+
+2026-07-28 수정 후 한국 중부 재검증:
+
+| 항목 | 결과 |
+| --- | --- |
+| ACR cloud build | 성공, image `office-sandbox:20260727224541` |
+| Image digest | `sha256:719165f1725599562221736110d300c40cdaf2e3aa8d61dd6eb535e5d840ed2b` |
+| 새 image session 확인 | `/health.release`가 image tag와 일치 |
+| 선언적 편집 3개 operation | `report.edited.docx`, `report.edited.pptx`, `report.edited.xlsx` 생성 |
+| PPTX 편집 | `replaceText` 결과가 slide XML에 반영됨 |
+| 배포 직후 stale ready session | 이전 release를 감지해 stop 확인 후 새 identifier로 재시도 |
+| 사용자 Gateway | create·edit·PPTX download·approve·delete 통과 |
+| 정리 | 검증 종료 후 Office session 0건 |

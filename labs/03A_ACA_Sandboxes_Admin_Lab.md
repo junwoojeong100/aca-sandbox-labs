@@ -43,13 +43,17 @@ python3 --version
 
 ### 권장 Fast Path
 
-repository root에서 다음 명령을 실행한다.
-처음 실행할 때는 먼저 3절의 virtual environment와 SDK를 준비하고 활성화한다.
+repository root에서 다음 한 명령을 실행한다.
 
 ```bash
-bash scripts/check-prereqs.sh
-python3 scripts/sandboxes-lab.py
+bash scripts/sandboxes-quickstart.sh python
 ```
+
+이 스크립트는 사전 조건 검사, `.work/sandboxes-venv` 생성, 검증된 SDK
+설치, provider·Resource Group·RBAC·SandboxGroup 준비를 수행한다. Ready
+상태의 `python-code-interpreter-*` disk image가 없으면 ACR을 생성 또는
+재사용하고 `python-sandbox/` image를 build·등록한 뒤 검증을 계속한다.
+새 RBAC 역할의 데이터 평면 전파가 늦으면 최대 3분 동안 자동 재시도한다.
 
 기본값은 현재 `az` subscription, `koreacentral`, `rg-ai-workspace-sandbox-lab`, `ai-workspace-sandboxes`다.  
 다른 값을 쓰려면 2절의 환경 변수를 명령 실행 전에 설정한다.
@@ -76,18 +80,31 @@ az account show --query '{subscription:id,user:user.name}' --output json
 mkdir -p "$LAB_WORK_DIR"
 ```
 
-현재 검증 환경의 Code Interpreter disk image는
-`python-code-interpreter-20260728103837`
-(`b72f9fe3-028a-4538-84ab-a7e89baea6b0`)이다. image source는
-`python-sandbox/Dockerfile`과 `python-sandbox/requirements.txt`이며
+Code Interpreter image source는 `python-sandbox/Dockerfile`과
+`python-sandbox/requirements.txt`이며
 pandas, NumPy, matplotlib, SciPy, scikit-learn과 Office 생성 라이브러리를
 포함한다.
 
-새 환경에서는 Sandboxes 전용 ACR에 image를 빌드한다.
+Fast Path는 Ready disk image가 없을 때 아래 수동 명령과 같은 ACR build와
+disk image 등록을 자동 수행한다.
 
 ```bash
 export ACR_NAME="${ACR_NAME:-aiwssbx$(printf '%s' "$SUBSCRIPTION_ID" | tr -d '-' | cut -c1-20)}"
 export PYTHON_IMAGE_TAG="$(date -u +%Y%m%d%H%M%S)"
+
+az acr show \
+  --name "$ACR_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --output none 2>/dev/null || {
+    az provider register --namespace Microsoft.ContainerRegistry --wait
+    az acr create \
+      --name "$ACR_NAME" \
+      --resource-group "$RESOURCE_GROUP" \
+      --location "$LOCATION" \
+      --sku Basic \
+      --admin-enabled false \
+      --output none
+  }
 
 az acr build \
   --registry "$ACR_NAME" \
@@ -114,10 +131,8 @@ environment를 사용한다.
 python3 -m venv .work/sandboxes-venv
 source .work/sandboxes-venv/bin/activate
 python -m pip install \
-  azure-containerapps-sandbox \
-  azure-identity \
-  azure-mgmt-resource \
-  azure-mgmt-authorization
+  "azure-containerapps-sandbox==0.1.0b4" \
+  azure-identity
 ```
 
 버전을 확인한다.
@@ -289,7 +304,9 @@ client.close()
 python3 8-connect.py
 ```
 
-이 실습에서는 `ubuntu` 공개 disk image를 사용한다.
+공개 image 목록을 확인하는 단계다. 아래 수동 실행은 기본적으로
+`python-3.12` 공개 disk image를 사용하고, `PYTHON_SANDBOX_DISK_ID`가 있으면
+custom Code Interpreter disk image를 사용한다.
 
 ## 9. Sandbox 생성과 첫 실행
 
@@ -378,7 +395,8 @@ python3 9-create-sandbox.py
 
 ## 10. 사전 설치 패키지 확인
 
-`ubuntu` 공개 image의 Python 환경에서 사용 가능한 라이브러리를 확인한다.
+`python-3.12` 공개 image 또는 지정한 custom image의 Python 환경에서
+사용 가능한 라이브러리를 확인한다.
 
 ```python
 # 10-check-packages.py
@@ -418,8 +436,10 @@ client.close()
 python3 10-check-packages.py
 ```
 
-> `ubuntu` 공개 image는 일반 Ubuntu 환경으로, Dynamic Sessions `PythonLTS`처럼 pandas·matplotlib 등이 사전 설치돼 있지 않다. AI 분석 워크로드에는 직접 `pip install`하거나 전처리 스냅샷을 사용한다(16절 참조).  
-> Egress를 허용해야 `pip install`이 가능하다. 인터넷 접근이 필요 없는 정적 실행 환경에는 Deny-all을 유지한다.
+> 공개 `python-3.12` image는 Dynamic Sessions `PythonLTS`와 패키지 구성이
+> 다를 수 있다. 자연어 분석 Gateway에는 Fast Path가 준비하는 custom Code
+> Interpreter disk image를 사용한다. Sandbox 안에서 `pip install`하기 위해
+> egress를 열기보다 필요한 패키지를 image build 단계에서 고정한다.
 
 ## 11. 파일 쓰기와 분석 실행
 
@@ -960,7 +980,15 @@ export LOCATION="koreacentral"
 
 ## 19. 정리
 
-모든 Sandbox와 SandboxGroup을 삭제한다.
+Fast Path로 만든 모든 Sandbox, snapshot, disk image와 SandboxGroup을
+삭제하려면 repository root에서 다음 명령을 실행한다.
+
+```bash
+export SANDBOXES_PYTHON="${SANDBOXES_PYTHON:-.work/sandboxes-venv/bin/python}"
+CONFIRM_DELETE=yes "$SANDBOXES_PYTHON" scripts/sandboxes-cleanup.py
+```
+
+아래 코드는 같은 작업을 SDK 단계별로 학습하기 위한 수동 경로다.
 
 ```python
 # 19-cleanup.py
@@ -1004,13 +1032,16 @@ mgmt.close()
 ```
 
 ```bash
-python3 19-cleanup.py
+"${SANDBOXES_PYTHON:-.work/sandboxes-venv/bin/python}" 19-cleanup.py
 ```
 
 SandboxGroup을 삭제해도 Resource Group, Log Analytics, ACR은 남는다.  
 Resource Group 자체를 삭제하려면 별도로 확인한 뒤 수행한다.
 
 ```bash
+export RESOURCE_GROUP="${RESOURCE_GROUP:-rg-ai-workspace-sandbox-lab}"
+az group show --name "$RESOURCE_GROUP" \
+  --query '{name:name,location:location,id:id}' --output table
 az group delete --name "$RESOURCE_GROUP" --yes --no-wait
 ```
 

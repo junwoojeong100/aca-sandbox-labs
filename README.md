@@ -17,18 +17,21 @@ AI Workspace가 사용자의 자연어 요청과 첨부파일을 받아 코드�
 | [자동 실행 스크립트](scripts/) | 관리자 | 사전 조건 검사, Python·Office·Agent 배포 및 검증, 명시적 전체 정리 |
 | [Offline 테스트](tests/) | 관리자·개발자 | Azure 없이 정책·검사·승인 게이트 검증 |
 
-## 처음이라면 이 순서로 진행
+## 처음이라면 실행 경로 하나 선택
 
-처음 수행하는 사람은 여러 경로를 섞지 말고 다음 순서만 따른다.
+먼저 [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli),
+Bash, `curl`, `jq`, Python 3.10 이상을 준비하고 `az login`을 실행한다. 그다음 두
+실행 방식 중 하나만 선택한다.
 
-1. [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli), Bash, `curl`, `jq`, Python 3를 준비하고 `az login`을 실행한다.
-2. 아래 **Python Sandbox만 확인** Fast Path를 실행한다.
-3. 자연어 요청까지 확인하려면 [실습 1A §16](labs/01A_Python_Code_Interpreter_Admin_Lab.md#16-llm-agent-backend-구성)에서 모델을 연결한다.
-4. [실습 1B](labs/01B_Python_Code_Interpreter_User_Lab.md)를 따라 사용자 API 흐름을 검증한다.
-5. Office PDF 변환이나 고정된 문서 도구가 필요할 때만 실습 2를 추가한다.
-6. 마지막에 사용한 Resource Group 이름을 확인하고 [Python 실습 정리](labs/01A_Python_Code_Interpreter_Admin_Lab.md#17-정리) 또는 [Office 실습 정리](labs/02A_Office_Custom_Container_Admin_Lab.md#17-정리)를 수행한다.
+| 목적 | 시작 경로 | 다음 단계 |
+| --- | --- | --- |
+| 관리형 pool에서 일회성 코드 실행 | 아래 **Dynamic Sessions - Python Fast Path** | 실제 LLM은 실습 1A §16, 사용자 흐름은 실습 1B |
+| 상태 유지, suspend/resume, 세밀한 egress 제어 | 아래 **ACA Sandboxes - 새 환경 Quick Start** | 실제 LLM은 실습 3A §18, 사용자 흐름은 실습 3B |
 
-> 실습 1B와 2B의 “사용자”는 실제 최종 사용자가 아니라 **사용자 경험을 REST API로 검증하는 실습 운영자·개발자**를 뜻한다. 실제 사용자는 terminal이나 `curl`을 사용하지 않고 AI Workspace UI에서 요청·미리보기·승인만 수행한다.
+Office PDF 변환이나 고정된 문서 도구가 필요할 때만 선택한 경로의 Office
+실습을 추가한다. 마지막에는 해당 관리자 가이드의 정리 절차를 수행한다.
+
+> 실습 1B·2B·3B·3D의 “사용자”는 실제 최종 사용자가 아니라 **사용자 경험을 REST API로 검증하는 실습 운영자·개발자**를 뜻한다. 실제 사용자는 terminal이나 `curl`을 사용하지 않고 AI Workspace UI에서 요청·미리보기·승인만 수행한다.
 >
 > 로컬 도구 설치가 부담되면 Azure Portal의 **Cloud Shell - Bash**를 사용한다. Repository를 clone한 뒤 같은 명령을 실행할 수 있다.
 
@@ -49,12 +52,14 @@ AI Workspace가 사용자의 자연어 요청과 첨부파일을 받아 코드�
 | 확인 결과 | 의미 | 조치 |
 | --- | --- | --- |
 | Resource 생성 권한 오류 | 현재 identity에 배포 권한이 없음 | 대상 Resource Group 또는 subscription에 `Contributor` 요청 |
-| Role assignment 권한 오류 | `Contributor`만으로는 역할을 부여할 수 없음 | `Owner` 또는 `User Access Administrator` 요청. 관리자가 Session Executor 역할을 대신 부여해도 됨 |
+| Role assignment 권한 오류 | `Contributor`만으로는 역할을 부여할 수 없음 | `Owner` 또는 `User Access Administrator` 요청. 관리자가 Session Executor 또는 SandboxGroup Data Owner 역할을 대신 부여해도 됨 |
 | Session pool quota `available=0` | 해당 subscription·region에서 새 pool 생성 불가 | Portal **My quotas**에서 Provider를 **Azure Container Apps**로 선택해 regional `Session pools` 증가 요청 |
 | Managed environment quota `available=0` | Office용 Environment를 새로 만들 수 없음 | 같은 Portal에서 `Managed Environment Count` 증가 요청 또는 기존 Environment 재사용 |
 | 지역 미지원 오류 | 선택한 `LOCATION`에서 Dynamic Sessions 사용 불가 | [지원 리전](https://learn.microsoft.com/azure/container-apps/sessions#supported-regions) 중 quota가 있는 리전 선택 |
 | Data plane HTTP 403 | Session Executor가 없거나 아직 전파되지 않음 | pool scope 역할 확인 → 30~60초 대기 → token 재발급 |
 | `SessionRequestValidationFailed` | endpoint, method, query 또는 API version 불일치 | 응답의 `error.code`, `message`, `target`, `traceId`를 확인하고 공식 API 문서와 비교 |
+| ACA Sandboxes SDK import 오류 | Preview SDK가 현재 Python 환경에 없음 | `bash scripts/sandboxes-quickstart.sh python`으로 전용 virtual environment 생성 |
+| Ready disk image가 없음 | ACA Sandbox에서 사용할 custom image가 아직 등록되지 않음 | 같은 Quick Start가 ACR image build와 disk image 등록을 자동 수행 |
 
 이 실습에서 확인하는 `Session pools`와 `Managed Environment Count` quota는 region 단위이고 Portal에서 증가를 요청한다. 요청은 즉시 승인되기도 하지만 검토가 필요하면 며칠 걸릴 수 있으므로 실습 직전에 처음 확인하지 않는다.
 
@@ -70,12 +75,32 @@ AI Workspace가 사용자의 자연어 요청과 첨부파일을 받아 코드�
 az account show --query '{name:name,id:id,user:user.name}' --output table
 ```
 
-### Python Sandbox만 확인
+### Dynamic Sessions - Python Fast Path
 
 ```bash
 bash scripts/check-prereqs.sh
 bash scripts/python-lab.sh
 ```
+
+### ACA Sandboxes - 새 환경 Quick Start
+
+다음 한 명령이 전용 virtual environment와 검증된 SDK를 준비하고,
+SandboxGroup·RBAC·ACR·Python custom disk image를 생성 또는 재사용한 뒤
+실행·격리·egress·suspend/resume을 검증한다.
+
+```bash
+bash scripts/sandboxes-quickstart.sh python
+```
+
+Office custom image까지 필요하면 다음 중 하나를 실행한다.
+
+```bash
+bash scripts/sandboxes-quickstart.sh office # Office만
+bash scripts/sandboxes-quickstart.sh all    # Python과 Office
+```
+
+세부 명령과 사용자 Gateway는 [실습 3](labs/03_ACA_Sandboxes_Lab.md)을
+따른다.
 
 ### 자연어 요청부터 승인까지 자동 검증
 

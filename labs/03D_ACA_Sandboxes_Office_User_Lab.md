@@ -52,8 +52,9 @@ export RESOURCE_GROUP="rg-ai-workspace-sandbox-lab"
 export LOCATION="koreacentral"
 export SANDBOX_GROUP_NAME="ai-workspace-sandboxes"
 export EXECUTION_BACKEND="sandboxes"
+export SANDBOXES_PYTHON="${SANDBOXES_PYTHON:-.work/sandboxes-venv/bin/python}"
 
-python3 -m office_gateway.server
+"$SANDBOXES_PYTHON" -m office_gateway.server
 ```
 
 Gateway는 기본적으로 `http://127.0.0.1:8090`에서 실행된다. 문서 job마다
@@ -242,8 +243,6 @@ draft job도 1시간 TTL 후 in-memory mapping과 SDK client를 정리한다.
 
 ## 9. 정리
 
-gateway를 실행한 terminal에서 `Ctrl+C`로 종료한다.
-
 job 삭제:
 
 ```bash
@@ -252,5 +251,7 @@ curl --fail-with-body --silent --show-error \
   "$OFFICE_USER_API/api/document-jobs/$DOCUMENT_JOB_ID" \
   --header "X-Demo-User: $DEMO_USER"
 ```
+
+DELETE 응답을 확인한 뒤 Gateway를 실행한 terminal에서 `Ctrl+C`로 종료한다.
 
 Office Sandbox와 disk image의 완전 정리는 관리자가 [실습 3C §14절](03C_ACA_Sandboxes_Office_Admin_Lab.md#14-정리)에서 수행한다.

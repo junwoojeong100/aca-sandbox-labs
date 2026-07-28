@@ -8,6 +8,8 @@ import json
 import os
 import subprocess
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 try:
@@ -28,13 +30,23 @@ except ImportError as error:
 
 
 def run_az(*args: str) -> str:
-    result = subprocess.run(
-        ["az", *args],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=600,
-    )
+    try:
+        result = subprocess.run(
+            ["az", *args],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=1200,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(
+            f"az {' '.join(args)} timed out after 1200 seconds"
+        ) from error
+    except subprocess.CalledProcessError as error:
+        message = error.stderr.strip() or error.stdout.strip() or str(error)
+        raise RuntimeError(
+            f"az {' '.join(args)} failed: {message}"
+        ) from error
     return result.stdout.strip()
 
 
@@ -48,7 +60,121 @@ def acr_credentials(acr_name: str) -> RegistryCredentials:
     )
 
 
+def list_disk_images_with_retry(
+    client: SandboxGroupClient,
+) -> list[object]:
+    for attempt in range(1, 19):
+        try:
+            return list(client.list_disk_images())
+        except Exception as error:
+            status_code = getattr(error, "status_code", None)
+            response = getattr(error, "response", None)
+            status_code = status_code or getattr(
+                response,
+                "status_code",
+                None,
+            )
+            message = str(error).lower()
+            authorization_pending = status_code == 403 or any(
+                marker in message
+                for marker in (
+                    "authorizationfailed",
+                    "forbidden",
+                    "does not have authorization",
+                )
+            )
+            if not authorization_pending or attempt == 18:
+                raise
+            print(
+                "SandboxGroup Data Owner 역할 전파 대기 "
+                f"({attempt}/18)...",
+                flush=True,
+            )
+            time.sleep(10)
+    raise RuntimeError("SandboxGroup role propagation retry exhausted")
+
+
+def ensure_acr(
+    acr_name: str,
+    resource_group: str,
+    location: str,
+) -> None:
+    run_az(
+        "provider",
+        "register",
+        "--namespace",
+        "Microsoft.ContainerRegistry",
+        "--wait",
+    )
+    existing = run_az(
+        "acr",
+        "list",
+        "--resource-group",
+        resource_group,
+        "--query",
+        f"[?name=='{acr_name}'].id | [0]",
+        "--output",
+        "tsv",
+    )
+    if existing:
+        return
+
+    run_az(
+        "acr",
+        "create",
+        "--name",
+        acr_name,
+        "--resource-group",
+        resource_group,
+        "--location",
+        location,
+        "--sku",
+        "Basic",
+        "--admin-enabled",
+        "false",
+        "--tags",
+        "purpose=ai-workspace-sandboxes",
+        "--output",
+        "none",
+    )
+
+
+def acr_tag_exists(
+    acr_name: str,
+    repository: str,
+    image_tag: str,
+) -> bool:
+    repositories = run_az(
+        "acr",
+        "repository",
+        "list",
+        "--name",
+        acr_name,
+        "--query",
+        f"[?@=='{repository}'] | [0]",
+        "--output",
+        "tsv",
+    )
+    if repositories != repository:
+        return False
+    tag = run_az(
+        "acr",
+        "repository",
+        "show-tags",
+        "--name",
+        acr_name,
+        "--repository",
+        repository,
+        "--query",
+        f"[?@=='{image_tag}'] | [0]",
+        "--output",
+        "tsv",
+    )
+    return tag == image_tag
+
+
 def main() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
     subscription_id = os.environ.get("SUBSCRIPTION_ID") or run_az(
         "account", "show", "--query", "id", "--output", "tsv"
     )
@@ -84,7 +210,7 @@ def main() -> None:
         image_tag = os.environ.get("IMAGE_TAG")
         disk_images = [
             item
-            for item in client.list_disk_images()
+            for item in list_disk_images_with_retry(client)
             if item.labels.get("name", "").startswith("office-")
             and item.status
             and item.status.state in {"Ready", "Succeeded"}
@@ -106,27 +232,32 @@ def main() -> None:
                 default=None,
             )
         if disk_image is None:
-            image_tag = image_tag or run_az(
-                "acr",
-                "repository",
-                "show-tags",
-                "--name",
-                acr_name,
-                "--repository",
-                repository,
-                "--orderby",
-                "time_desc",
-                "--top",
-                "1",
-                "--query",
-                "[0]",
-                "--output",
-                "tsv",
+            ensure_acr(acr_name, resource_group, location)
+            requested_tag = image_tag
+            image_tag = requested_tag or datetime.now(timezone.utc).strftime(
+                "%Y%m%d%H%M%S"
             )
-            if not image_tag:
-                raise RuntimeError(
-                    f"No ready Office disk image or ACR tag found for "
-                    f"{acr_name}/{repository}"
+            if not requested_tag or not acr_tag_exists(
+                acr_name,
+                repository,
+                requested_tag,
+            ):
+                print(
+                    f"Building {repository}:{image_tag} in ACR...",
+                    flush=True,
+                )
+                run_az(
+                    "acr",
+                    "build",
+                    "--registry",
+                    acr_name,
+                    "--image",
+                    f"{repository}:{image_tag}",
+                    "--file",
+                    str(repo_root / "office-container" / "Dockerfile"),
+                    str(repo_root / "office-container"),
+                    "--output",
+                    "none",
                 )
             image = f"{acr_name}.azurecr.io/{repository}:{image_tag}"
             disk_image_name = f"office-{image_tag}"

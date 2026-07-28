@@ -37,29 +37,32 @@ LibreOffice, Pandoc, Poppler를 포함한 Office 도구 이미지를 OCI disk im
 - `curl`, `jq`, `file`, `shasum` 또는 `sha256sum`
 - 대상 subscription의 Contributor
 - role assignment를 위한 Owner 또는 User Access Administrator
-- `office-container/`의 Dockerfile과 기존 ACR image
-- [실습 3A](03A_ACA_Sandboxes_Admin_Lab.md)에서 `ai-workspace-sandboxes` SandboxGroup 생성 완료
+- `office-container/`의 Dockerfile
+- 수동 경로에서는 [실습 3A](03A_ACA_Sandboxes_Admin_Lab.md)의 SandboxGroup 생성 완료. Fast Path는 자동 준비
 
 현재 subscription과 필수 도구를 확인한다.
 
 ```bash
 az account show --query '{name:name,id:id,user:user.name}' --output table
 command -v az python3 curl jq file
-python3 -c "import azure.containerapps.sandbox; print('SDK OK')"
 ```
+
+Fast Path는 SDK를 전용 virtual environment에 설치한다. 수동 경로에서는
+실습 3A §3의 virtual environment를 먼저 활성화한다.
 
 ### 권장 Fast Path
 
-실습 3A의 SandboxGroup을 준비한 뒤 repository root에서 실행한다. ready
-Office disk image가 있으면 ACR 없이 재사용하고, 없을 때만 기존 ACR의 가장
-최신 `office-sandbox` tag를 disk image로 등록한다. Office Sandbox
-생성·변환·편집·egress·suspend/resume을 검증한 뒤 active Sandbox만 삭제한다.
-SandboxGroup과 ready disk image는 재사용을 위해 남긴다.
+repository root에서 다음 한 명령을 실행한다.
 
 ```bash
-python3 scripts/sandboxes-lab.py
-python3 scripts/sandboxes-office-lab.py
+bash scripts/sandboxes-quickstart.sh office
 ```
+
+이 스크립트는 전용 virtual environment와 SDK, SandboxGroup·RBAC을
+준비한다. Ready Office disk image가 없으면 ACR을 생성 또는 재사용하고
+`office-container/` image를 build·등록한다. 생성·변환·편집·egress와
+suspend/resume을 검증한 뒤 active Sandbox만 삭제하고, SandboxGroup과
+Ready disk image는 재사용을 위해 남긴다.
 
 2026-07-28 한국 중부에서 `azure-containerapps-sandbox 0.1.0b4`로 실제
 검증한 경로다. 결과는 `.work/sandboxes-live/office-validation.json`에
@@ -73,7 +76,6 @@ export RESOURCE_GROUP="${RESOURCE_GROUP:-rg-ai-workspace-sandbox-lab}"
 export LOCATION="${LOCATION:-koreacentral}"
 export SANDBOX_GROUP_NAME="${SANDBOX_GROUP_NAME:-ai-workspace-sandboxes}"
 export ACR_NAME="${ACR_NAME:-aiwssbx$(printf '%s' "$SUBSCRIPTION_ID" | tr -d '-' | cut -c1-20)}"
-export IDENTITY_NAME="${IDENTITY_NAME:-id-ai-workspace-office-acr-pull}"
 export IMAGE_REPOSITORY="office-sandbox"
 export IMAGE_TAG="$(date -u +%Y%m%d%H%M%S)"
 export IMAGE="$ACR_NAME.azurecr.io/$IMAGE_REPOSITORY:$IMAGE_TAG"
@@ -83,10 +85,10 @@ az account set --subscription "$SUBSCRIPTION_ID"
 mkdir -p "$LAB_WORK_DIR"
 ```
 
-실습 2A에서 이미 ACR과 Managed Identity를 만들었다면 동일한 이름을 사용한다.  
-없으면 3절에서 새로 만든다.
+실습 2A에서 이미 ACR을 만들었다면 동일한 이름을 사용할 수 있다. 없으면
+3절에서 새로 만든다.
 
-## 3. ACR 및 Managed Identity 확인 또는 생성
+## 3. ACR 확인 또는 생성
 
 ```bash
 # 이미 있으면 건너뜀
@@ -102,39 +104,6 @@ az acr show --name "$ACR_NAME" --resource-group "$RESOURCE_GROUP" \
     --tags purpose=ai-workspace-office-sandbox \
     --output none
 }
-
-# Managed Identity (ACR pull 전용)
-az identity show --name "$IDENTITY_NAME" --resource-group "$RESOURCE_GROUP" \
-  --output none 2>/dev/null || {
-  az identity create \
-    --name "$IDENTITY_NAME" \
-    --resource-group "$RESOURCE_GROUP" \
-    --location "$LOCATION" \
-    --tags purpose=ai-workspace-office-image-pull \
-    --output none
-}
-
-export IDENTITY_ID=$(az identity show \
-  --name "$IDENTITY_NAME" --resource-group "$RESOURCE_GROUP" \
-  --query id --output tsv)
-
-export IDENTITY_PRINCIPAL_ID=$(az identity show \
-  --name "$IDENTITY_NAME" --resource-group "$RESOURCE_GROUP" \
-  --query principalId --output tsv)
-
-export ACR_ID=$(az acr show --name "$ACR_NAME" --resource-group "$RESOURCE_GROUP" \
-  --query id --output tsv)
-
-# AcrPull 역할 (없으면 추가)
-az role assignment list \
-  --assignee "$IDENTITY_PRINCIPAL_ID" --scope "$ACR_ID" \
-  --query "[?roleDefinitionName=='AcrPull'].roleDefinitionName" \
-  --output tsv | grep -q AcrPull || \
-az role assignment create \
-  --role AcrPull \
-  --assignee-object-id "$IDENTITY_PRINCIPAL_ID" \
-  --assignee-principal-type ServicePrincipal \
-  --scope "$ACR_ID"
 ```
 
 ## 4. Private ACR 인증 제한 확인
@@ -147,8 +116,8 @@ az role assignment create \
 따라서 이 실습은 `az acr login --expose-token`이 반환하는 단기 ACR refresh
 token을 메모리에서만 `RegistryCredentials`로 전달한다. token을 파일,
 shell history 또는 로그에 출력하지 않는다. Managed Identity pull이
-서비스와 SDK에서 지원되면 6절을 `managed_identity_resource_id=IDENTITY_ID`
-방식으로 전환한다.
+서비스와 SDK에서 지원되면 별도의 ACR pull identity를 만들고 6절을
+`managed_identity_resource_id` 방식으로 전환한다.
 
 ## 5. Office Container 이미지 빌드와 ACR 푸시
 
@@ -936,7 +905,7 @@ client.close()
 ```
 
 ```bash
-python3 14-cleanup.py
+"${SANDBOXES_PYTHON:-.work/sandboxes-venv/bin/python}" 14-cleanup.py
 ```
 
 > disk image는 자동 삭제되지 않는다. 재사용 예정이면 `delete_disk_image()` 호출을 건너뛴다.  
@@ -951,7 +920,7 @@ python3 14-cleanup.py
 | **파일 접근** | `POST /files`, `GET /files/{name}/content` | `sb.write_file()`, `sb.read_file()` |
 | **환경 비용** | Dedicated plan, nodeCount 기반, ready session 상시 과금 | M tier 기준, suspend 중 무과금 |
 | **이미지 등록** | `az containerapp sessionpool create --custom-container-image` | `client.begin_create_disk_image(base_image=...).result()` |
-| **Managed Identity** | ACR pull identity → Environment | ACR pull identity → SandboxGroup |
+| **Private image 인증** | ACR pull identity → Environment | 현재 Preview는 단기 ACR refresh token으로 disk image 등록 |
 | **상태 보존** | 불가 (cooldown 후 삭제) | Suspend/Resume, Snapshot |
 | **Probe** | Startup·Liveness probe (HTTP `/health`) | 없음 (exec으로 직접 확인) |
 | **허용 목록 관리** | server.py 안에서 강제 | gateway에서 exec 호출 전 강제 |

@@ -65,12 +65,21 @@
 2. [실습 3D](03D_ACA_Sandboxes_Office_User_Lab.md)로 Sandboxes 전용 Office
    Gateway의 생성·변환·편집·다운로드·승인 흐름을 검증한다.
 
-빠른 자동 검증:
+## 새 환경 Quick Start
+
+repository root에서 다음 중 하나만 실행한다. Quick Start는
+`bash scripts/check-prereqs.sh`, 전용 virtual environment와 검증된 Preview
+SDK 설치, SandboxGroup·RBAC 준비를 포함한다. Ready custom disk image가
+없으면 ACR을 만들고 image를 build·등록한다.
 
 ```bash
-bash scripts/check-prereqs.sh
-python3 scripts/sandboxes-lab.py        # Python 코드 실행 검증
-python3 scripts/sandboxes-office-lab.py # Office Custom Image 검증
+bash scripts/sandboxes-quickstart.sh python # Python 코드 실행
+bash scripts/sandboxes-quickstart.sh office # Office Custom Image
+bash scripts/sandboxes-quickstart.sh all    # 두 경로 모두
 ```
+
+기존 환경에서는 Ready disk image와 Azure 리소스를 재사용한다. 수동으로
+각 Azure 명령과 SDK 호출을 학습하거나 실패 원인을 추적할 때만 3A·3C의
+세부 절차를 수행한다.
 
 > 실제 LLM 호출은 실습 3A §18절에서 LLM backend 구성 후 실습 3B에서 수행한다.

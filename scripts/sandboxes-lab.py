@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
+import argparse
 import base64
 import hashlib
 import json
 import os
 import subprocess
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 try:
@@ -17,6 +20,7 @@ try:
         AutoSuspendPolicy,
         EgressPolicy,
         LifecyclePolicy,
+        RegistryCredentials,
         SandboxGroupClient,
         SandboxGroupManagementClient,
         endpoint_for_region,
@@ -30,14 +34,76 @@ except ImportError as error:
 
 
 def run_az(*args: str) -> str:
-    result = subprocess.run(
-        ["az", *args],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=180,
-    )
+    try:
+        result = subprocess.run(
+            ["az", *args],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=1200,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(
+            f"az {' '.join(args)} timed out after 1200 seconds"
+        ) from error
+    except subprocess.CalledProcessError as error:
+        message = error.stderr.strip() or error.stdout.strip() or str(error)
+        raise RuntimeError(
+            f"az {' '.join(args)} failed: {message}"
+        ) from error
     return result.stdout.strip()
+
+
+def acr_credentials(acr_name: str) -> RegistryCredentials:
+    token = json.loads(
+        run_az(
+            "acr",
+            "login",
+            "--name",
+            acr_name,
+            "--expose-token",
+            "--output",
+            "json",
+        )
+    )
+    return RegistryCredentials(
+        username=token["username"],
+        token=token["refreshToken"],
+    )
+
+
+def list_disk_images_with_retry(
+    client: SandboxGroupClient,
+) -> list[object]:
+    for attempt in range(1, 19):
+        try:
+            return list(client.list_disk_images())
+        except Exception as error:
+            status_code = getattr(error, "status_code", None)
+            response = getattr(error, "response", None)
+            status_code = status_code or getattr(
+                response,
+                "status_code",
+                None,
+            )
+            message = str(error).lower()
+            authorization_pending = status_code == 403 or any(
+                marker in message
+                for marker in (
+                    "authorizationfailed",
+                    "forbidden",
+                    "does not have authorization",
+                )
+            )
+            if not authorization_pending or attempt == 18:
+                raise
+            print(
+                "SandboxGroup Data Owner 역할 전파 대기 "
+                f"({attempt}/18)...",
+                flush=True,
+            )
+            time.sleep(10)
+    raise RuntimeError("SandboxGroup role propagation retry exhausted")
 
 
 def caller_object_id() -> str:
@@ -63,7 +129,8 @@ def caller_object_id() -> str:
 def ensure_data_owner(subscription_id: str, resource_group: str) -> None:
     role = "Container Apps SandboxGroup Data Owner"
     scope = f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
-    object_id = caller_object_id()
+    object_id = os.environ.get("CALLER_OBJECT_ID") or caller_object_id()
+    principal_type = os.environ.get("CALLER_PRINCIPAL_TYPE", "User")
     existing = run_az(
         "role",
         "assignment",
@@ -86,7 +153,7 @@ def ensure_data_owner(subscription_id: str, resource_group: str) -> None:
         "--assignee-object-id",
         object_id,
         "--assignee-principal-type",
-        "User",
+        principal_type,
         "--role",
         role,
         "--scope",
@@ -96,7 +163,172 @@ def ensure_data_owner(subscription_id: str, resource_group: str) -> None:
     )
 
 
+def ensure_acr(
+    acr_name: str,
+    resource_group: str,
+    location: str,
+) -> None:
+    run_az(
+        "provider",
+        "register",
+        "--namespace",
+        "Microsoft.ContainerRegistry",
+        "--wait",
+    )
+    existing = run_az(
+        "acr",
+        "list",
+        "--resource-group",
+        resource_group,
+        "--query",
+        f"[?name=='{acr_name}'].id | [0]",
+        "--output",
+        "tsv",
+    )
+    if existing:
+        return
+
+    run_az(
+        "acr",
+        "create",
+        "--name",
+        acr_name,
+        "--resource-group",
+        resource_group,
+        "--location",
+        location,
+        "--sku",
+        "Basic",
+        "--admin-enabled",
+        "false",
+        "--tags",
+        "purpose=ai-workspace-sandboxes",
+        "--output",
+        "none",
+    )
+
+
+def acr_tag_exists(
+    acr_name: str,
+    repository: str,
+    image_tag: str,
+) -> bool:
+    repositories = run_az(
+        "acr",
+        "repository",
+        "list",
+        "--name",
+        acr_name,
+        "--query",
+        f"[?@=='{repository}'] | [0]",
+        "--output",
+        "tsv",
+    )
+    if repositories != repository:
+        return False
+    tag = run_az(
+        "acr",
+        "repository",
+        "show-tags",
+        "--name",
+        acr_name,
+        "--repository",
+        repository,
+        "--query",
+        f"[?@=='{image_tag}'] | [0]",
+        "--output",
+        "tsv",
+    )
+    return tag == image_tag
+
+
+def ensure_python_disk_image(
+    client: SandboxGroupClient,
+    *,
+    acr_name: str,
+    resource_group: str,
+    location: str,
+    repository: str,
+    repo_root: Path,
+    evidence: dict[str, object],
+) -> object:
+    python_images = [
+        image
+        for image in list_disk_images_with_retry(client)
+        if image.labels.get("name", "").startswith(
+            "python-code-interpreter-"
+        )
+        and image.status
+        and image.status.state in {"Ready", "Succeeded"}
+    ]
+    existing = max(
+        python_images,
+        key=lambda image: image.labels["name"],
+        default=None,
+    )
+    if existing is not None:
+        evidence["source_image"] = str(existing.image.base)
+        evidence["disk_image_auth"] = "existing disk image"
+        return existing
+
+    ensure_acr(acr_name, resource_group, location)
+    requested_tag = os.environ.get("PYTHON_IMAGE_TAG")
+    image_tag = requested_tag or datetime.now(timezone.utc).strftime(
+        "%Y%m%d%H%M%S"
+    )
+    if not requested_tag or not acr_tag_exists(
+        acr_name,
+        repository,
+        requested_tag,
+    ):
+        print(
+            f"Building {repository}:{image_tag} in ACR...",
+            flush=True,
+        )
+        run_az(
+            "acr",
+            "build",
+            "--registry",
+            acr_name,
+            "--image",
+            f"{repository}:{image_tag}",
+            "--file",
+            str(repo_root / "python-sandbox" / "Dockerfile"),
+            str(repo_root / "python-sandbox"),
+            "--output",
+            "none",
+        )
+
+    image = f"{acr_name}.azurecr.io/{repository}:{image_tag}"
+    disk_image_name = f"python-code-interpreter-{image_tag}"
+    print(f"Registering disk image from {image}...", flush=True)
+    disk_image = client.begin_create_disk_image(
+        image,
+        name=disk_image_name,
+        entrypoint=["/bin/sh", "-c"],
+        cmd=["sleep infinity"],
+        registry_credentials=acr_credentials(acr_name),
+        polling_timeout=1200,
+        polling_interval=10,
+    ).result()
+    evidence["source_image"] = image
+    evidence["disk_image_auth"] = "temporary ACR refresh token"
+    return disk_image
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--provision-only",
+        action="store_true",
+        help="Create the Resource Group, RBAC, and SandboxGroup, then exit.",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = parse_args()
+    repo_root = Path(__file__).resolve().parents[1]
     subscription_id = os.environ.get("SUBSCRIPTION_ID") or run_az(
         "account", "show", "--query", "id", "--output", "tsv"
     )
@@ -107,12 +339,26 @@ def main() -> None:
     sandbox_group = os.environ.get(
         "SANDBOX_GROUP_NAME", "ai-workspace-sandboxes"
     )
+    acr_name = os.environ.get(
+        "ACR_NAME", f"aiwssbx{subscription_id.replace('-', '')[:20]}"
+    )
+    repository = os.environ.get(
+        "PYTHON_IMAGE_REPOSITORY",
+        "python-code-interpreter",
+    )
     work_dir = Path(
         os.environ.get("SANDBOX_WORK_DIR", ".work/sandboxes-live")
     )
     work_dir.mkdir(parents=True, exist_ok=True)
 
     run_az("account", "set", "--subscription", subscription_id)
+    run_az(
+        "provider",
+        "register",
+        "--namespace",
+        "Microsoft.App",
+        "--wait",
+    )
     run_az(
         "group",
         "create",
@@ -162,30 +408,40 @@ def main() -> None:
         "sandbox_group_state": group.properties["provisioningState"],
     }
     try:
+        if args.provision_only:
+            evidence["result"] = "provisioned"
+            print("ACA SandboxGroup provisioning passed.", flush=True)
+            return
+
         policy = EgressPolicy(
             default_action="Deny",
             traffic_inspection="Full",
         )
-        python_images = [
-            image
-            for image in client.list_disk_images()
-            if image.labels.get("name", "").startswith(
-                "python-code-interpreter-"
-            )
-            and image.status
-            and image.status.state in {"Ready", "Succeeded"}
-        ]
-        python_image = max(
-            python_images,
-            key=lambda image: image.labels["name"],
-            default=None,
+        requested_disk_image_id = os.environ.get(
+            "PYTHON_SANDBOX_DISK_ID"
         )
-        if python_image is None:
-            raise RuntimeError(
-                "Ready 상태의 python-code-interpreter disk image가 없다. "
-                "python-sandbox/ image를 먼저 build/register한다."
+        if requested_disk_image_id:
+            source = {
+                "disk": None,
+                "disk_id": requested_disk_image_id,
+            }
+            evidence["disk_image_id"] = requested_disk_image_id
+            evidence["disk_image_name"] = "environment override"
+            evidence["disk_image_auth"] = "not applicable"
+        else:
+            python_image = ensure_python_disk_image(
+                client,
+                acr_name=acr_name,
+                resource_group=resource_group,
+                location=location,
+                repository=repository,
+                repo_root=repo_root,
+                evidence=evidence,
             )
-        source = {"disk": None, "disk_id": python_image.id}
+            source = {"disk": None, "disk_id": python_image.id}
+            evidence["disk_image_id"] = python_image.id
+            evidence["disk_image_name"] = python_image.labels["name"]
+
         print("Creating primary Python sandbox...", flush=True)
         primary = client.begin_create_sandbox(
             **source,
@@ -212,8 +468,6 @@ def main() -> None:
         )
         evidence["primary_id"] = primary.sandbox_id
         evidence["primary_state"] = primary.get().state
-        evidence["disk_image_id"] = python_image.id
-        evidence["disk_image_name"] = python_image.labels["name"]
 
         version = primary.exec(
             "python3 -c 'import platform; print(platform.python_version())'"
@@ -352,6 +606,6 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except (RuntimeError, subprocess.CalledProcessError) as error:
+    except RuntimeError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         raise SystemExit(1) from error

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from agent import broker, config, llm, orchestrator, staging
+from agent import config, execution, llm, orchestrator, staging
 
 SAFE_USER = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 MAX_REQUEST_CHARS = 20_000
@@ -53,7 +53,7 @@ class PythonGatewayService:
         *,
         staging_root: Path,
         approved_root: Path,
-        backend: str = "dynamic-sessions",
+        backend: str,
         max_active_jobs: int = MAX_ACTIVE_PYTHON_JOBS,
     ) -> None:
         self.runner_factory = runner_factory
@@ -132,8 +132,12 @@ class PythonGatewayService:
         ]
 
     @staticmethod
-    def _safe_text(text: str, session_identifier: str) -> str:
-        sanitized = text.replace(session_identifier, "[session]") if session_identifier else text
+    def _safe_text(text: str, execution_identifier: str) -> str:
+        sanitized = (
+            text.replace(execution_identifier, "[execution]")
+            if execution_identifier
+            else text
+        )
         return INTERNAL_PATH.sub("[internal-path]", sanitized)
 
     def public_view(self, job: AnalysisJob) -> dict[str, object]:
@@ -148,11 +152,11 @@ class PythonGatewayService:
             "attempts": job.result.attempts,
             "plan": self._safe_text(
                 job.result.plan,
-                job.result.session_identifier,
+                job.result.execution_identifier,
             ),
             "stdout": self._safe_text(
                 job.result.stdout[-4000:],
-                job.result.session_identifier,
+                job.result.execution_identifier,
             ),
             "artifacts": self._safe_artifacts(job.result),
             "promotions": job.result.promotions,
@@ -184,7 +188,7 @@ class PythonGatewayService:
                 approve=False,
             )
         except (
-            broker.BrokerError,
+            execution.ExecutionError,
             config.ConfigError,
             llm.LLMError,
             staging.StagingError,

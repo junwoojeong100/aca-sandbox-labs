@@ -1,1 +1,1 @@
-"""User-facing reference gateway for Python analysis jobs."""
+"""Backend-neutral user-facing Python analysis gateway service."""

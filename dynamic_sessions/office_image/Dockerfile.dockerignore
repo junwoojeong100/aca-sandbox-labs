@@ -1,0 +1,4 @@
+**
+!dynamic_sessions/office_image/Dockerfile
+!dynamic_sessions/office_image/requirements.txt
+!office_gateway/container_api.py

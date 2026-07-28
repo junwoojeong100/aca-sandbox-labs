@@ -4,7 +4,7 @@
 -> artifact staging과 검사 -> 승인 -> 승격까지의 전체 흐름을 연결한다.
 
 모든 단계는 correlation ID로 이어진다.
-session identifier는 감사 로그에만 남기고 사용자 응답에는 넣지 않는다.
+backend execution identifier는 감사 로그에만 남기고 사용자 응답에는 넣지 않는다.
 """
 
 from __future__ import annotations
@@ -15,9 +15,9 @@ import secrets
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-from . import broker, config, llm, policy, staging
+from . import config, execution, llm, policy, staging
 
 BOOTSTRAP_INSPECTION_CODE = """\
 import json
@@ -67,10 +67,10 @@ class RunResult:
     artifacts: list[dict[str, Any]] = field(default_factory=list)
     promotions: list[dict[str, Any]] = field(default_factory=list)
     audit: list[dict[str, Any]] = field(default_factory=list)
-    session_identifier: str = ""
+    execution_identifier: str = ""
 
     def user_view(self) -> dict[str, Any]:
-        """사용자에게 반환하는 응답. identifier와 내부 경로를 넣지 않는다."""
+        """사용자 응답에서 execution identifier와 내부 경로를 제거한다."""
         return {
             "classification": self.decision.get("classification"),
             "route": self.decision.get("route"),
@@ -78,10 +78,10 @@ class RunResult:
             "reason": self.decision.get("reason"),
             "succeeded": self.succeeded,
             "attempts": self.attempts,
-            "plan": sanitize_user_text(self.plan, self.session_identifier),
+            "plan": sanitize_user_text(self.plan, self.execution_identifier),
             "stdout": sanitize_user_text(
                 self.stdout[-4000:],
-                self.session_identifier,
+                self.execution_identifier,
             ),
             "artifacts": [
                 {
@@ -112,7 +112,7 @@ class RunResult:
         """감사 로그. backend 저장소에만 남긴다."""
         return {
             "requestId": self.request_id,
-            "sessionIdentifier": self.session_identifier,
+            "executionIdentifier": self.execution_identifier,
             "decision": self.decision,
             "succeeded": self.succeeded,
             "attempts": self.attempts,
@@ -129,18 +129,28 @@ def sanitize_error(stderr: str, limit: int = 2000) -> str:
     return trimmed[-limit:]
 
 
-def sanitize_user_text(text: str, session_identifier: str = "") -> str:
-    """Remove backend-only session identifiers and common internal paths."""
-    sanitized = text.replace(session_identifier, "[session]") if session_identifier else text
+def sanitize_user_text(text: str, execution_identifier: str = "") -> str:
+    """Remove backend-only execution identifiers and common internal paths."""
+    sanitized = (
+        text.replace(execution_identifier, "[execution]")
+        if execution_identifier
+        else text
+    )
     return USER_INTERNAL_PATH.sub("[internal-path]", sanitized)
 
 
 class Orchestrator:
     def __init__(
         self,
+        session_factory: Callable[[], execution.PythonExecution],
+        backend_name: str,
+        classifier: Callable[[policy.PolicyInput], policy.PolicyDecision],
         settings: config.Settings | None = None,
         llm_client: Any | None = None,
     ) -> None:
+        self.session_factory = session_factory
+        self.backend_name = backend_name
+        self.classifier = classifier
         self.settings = settings or config.Settings()
         self.llm = llm_client or llm.create_client(self.settings)
 
@@ -160,7 +170,7 @@ class Orchestrator:
         request_id = f"req-{secrets.token_hex(8)}"
         audit: list[StepLog] = []
 
-        decision = policy.classify(
+        decision = self.classifier(
             policy.PolicyInput(
                 tenant_id=tenant_id,
                 user_id=user_id,
@@ -184,35 +194,25 @@ class Orchestrator:
                 audit=[entry.as_dict() for entry in audit],
             )
 
-        if decision.route is not policy.Route.PYTHON_POOL:
+        if decision.route is not policy.Route.PYTHON:
             return RunResult(
                 request_id=request_id,
                 decision=decision.as_dict(),
                 succeeded=False,
                 attempts=0,
                 stderr=(
-                    f"이 orchestrator는 Python pool 경로만 실행한다. "
+                    f"이 orchestrator는 Python 실행 경로만 처리한다. "
                     f"요청 경로: {decision.route.value}"
                 ),
                 audit=[entry.as_dict() for entry in audit],
             )
 
-        session = broker.create_python_session(self.settings)
+        session = self.session_factory()
         audit.append(
             StepLog(
-                "session-allocated",
+                "execution-allocated",
                 {
-                    "backend": self.settings.execution_backend,
-                    "pool": (
-                        self.settings.python_pool_name
-                        if self.settings.execution_backend == "dynamic-sessions"
-                        else None
-                    ),
-                    "sandboxGroup": (
-                        self.settings.sandbox_group_name
-                        if self.settings.execution_backend == "sandboxes"
-                        else None
-                    ),
+                    "backend": self.backend_name,
                     "reuse": False,
                 },
             )
@@ -223,7 +223,7 @@ class Orchestrator:
             decision=decision.as_dict(),
             succeeded=False,
             attempts=0,
-            session_identifier=session.identifier,
+            execution_identifier=session.identifier,
         )
 
         try:
@@ -238,7 +238,7 @@ class Orchestrator:
 
             bootstrap = session.execute(BOOTSTRAP_INSPECTION_CODE)
             audit.append(
-                StepLog("session-bootstrap", {"stdout": bootstrap.stdout.strip()[:1000]})
+                StepLog("execution-bootstrap", {"stdout": bootstrap.stdout.strip()[:1000]})
             )
 
             failure: str | None = None
@@ -275,7 +275,8 @@ class Orchestrator:
                     continue
 
                 execution = session.execute(
-                    plan.code, timeout=self.settings.execution_timeout_seconds + 60
+                    plan.code,
+                    timeout=self.settings.execution_timeout_seconds,
                 )
                 result.stdout = execution.stdout
                 result.stderr = execution.stderr
@@ -411,12 +412,12 @@ class Orchestrator:
             try:
                 status = session.delete()
                 audit.append(
-                    StepLog("session-deleted", {"httpStatus": status})
+                    StepLog("execution-deleted", {"status": status})
                 )
             except Exception as error:
                 audit.append(
                     StepLog(
-                        "session-delete-failed",
+                        "execution-delete-failed",
                         {"error": str(error)[:500]},
                     )
                 )

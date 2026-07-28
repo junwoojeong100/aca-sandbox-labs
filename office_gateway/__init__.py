@@ -1,1 +1,1 @@
-"""User-facing reference gateway for the Office session pool."""
+"""Backend-neutral user-facing Office gateway service."""

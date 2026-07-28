@@ -4,7 +4,7 @@
 `stub` provider는 LLM 배포 없이도 실습과 CI가 동작하도록 결정론적 계획을 만든다.
 
 LLM에는 절대 다음을 전달하지 않는다.
-- session identifier, access token, pool endpoint
+- execution identifier, access token, backend endpoint
 - production credential과 connector 정보
 - 다른 tenant의 데이터
 """
@@ -18,19 +18,19 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
-from . import broker, config
+from . import auth, config
 
-SYSTEM_PROMPT = """\
+SYSTEM_PROMPT_TEMPLATE = """\
 너는 격리된 sandbox에서 실행할 Python 코드를 만드는 데이터 분석 assistant다.
 
 규칙:
 - 반드시 JSON 하나만 출력한다. markdown code fence를 쓰지 않는다.
-- JSON 형식: {"plan": "한국어 한 문장", "code": "python source"}
+- JSON 형식: {{"plan": "한국어 한 문장", "code": "python source"}}
 - 입력 파일은 /mnt/data 아래에 있다. 결과 파일도 /mnt/data 아래에 쓴다.
 - 외부 network 접근은 차단돼 있다. requests, urllib, socket, pip install을 쓰지 않는다.
 - subprocess, os.system 같은 shell 실행을 쓰지 않는다.
 - 표준 라이브러리와 사전 설치된 분석 라이브러리만 쓴다.
-- 실행 시간은 220초 미만이어야 한다.
+- 실행 시간은 {max_execution_seconds}초 미만이어야 한다.
 - 마지막에 무엇을 만들었는지 print로 요약한다.
 """
 
@@ -214,7 +214,7 @@ class AzureOpenAIClient:
             raise LLMError(f"Azure OpenAI가 요청 파라미터를 거부했다: {error}") from error
 
     def _post(self, payload: dict[str, object]) -> str:
-        token = broker.get_token(config.COGNITIVE_SERVICES_SCOPE)
+        token = auth.get_token(config.COGNITIVE_SERVICES_SCOPE)
         request = urllib.request.Request(
             self._url(),
             data=json.dumps(payload).encode("utf-8"),
@@ -272,7 +272,14 @@ class AzureOpenAIClient:
                 else ""
             )
             self._history = [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {
+                    "role": "system",
+                    "content": SYSTEM_PROMPT_TEMPLATE.format(
+                        max_execution_seconds=(
+                            self.settings.execution_timeout_seconds
+                        )
+                    ),
+                },
                 {
                     "role": "user",
                     "content": request_text + attachment_note + output_note,

@@ -1,0 +1,4 @@
+**
+!aca_sandboxes/images/office/Dockerfile
+!aca_sandboxes/images/office/requirements.txt
+!office_gateway/container_api.py

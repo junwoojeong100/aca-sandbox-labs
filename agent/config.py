@@ -13,6 +13,7 @@ from pathlib import Path
 
 DYNAMIC_SESSIONS_SCOPE = "https://dynamicsessions.io"
 COGNITIVE_SERVICES_SCOPE = "https://cognitiveservices.azure.com"
+SUPPORTED_EXECUTION_BACKENDS = frozenset({"dynamic-sessions", "sandboxes"})
 
 PYTHON_API_VERSION = (
     os.environ.get("PYTHON_API_VERSION", "2025-10-02-preview").strip()
@@ -70,6 +71,15 @@ def pool_endpoint(pool_name: str, resource_group: str) -> str:
 class Settings:
     """Orchestrator 실행에 필요한 설정."""
 
+    execution_backend: str = field(
+        default_factory=lambda: (
+            _env("EXECUTION_BACKEND", "dynamic-sessions")
+            or "dynamic-sessions"
+        ).lower()
+    )
+    subscription_id: str | None = field(
+        default_factory=lambda: _env("SUBSCRIPTION_ID")
+    )
     resource_group: str = field(
         default_factory=lambda: _env("RESOURCE_GROUP", "rg-ai-workspace-sandbox-lab")
         or "rg-ai-workspace-sandbox-lab"
@@ -87,6 +97,19 @@ class Settings:
     )
     office_endpoint: str | None = field(
         default_factory=lambda: _env("OFFICE_ENDPOINT")
+    )
+    location: str = field(
+        default_factory=lambda: _env("LOCATION", "koreacentral")
+        or "koreacentral"
+    )
+    sandbox_group_name: str = field(
+        default_factory=lambda: _env(
+            "SANDBOX_GROUP_NAME", "ai-workspace-sandboxes"
+        )
+        or "ai-workspace-sandboxes"
+    )
+    python_sandbox_disk_id: str | None = field(
+        default_factory=lambda: _env("PYTHON_SANDBOX_DISK_ID")
     )
     staging_dir: Path = field(
         default_factory=lambda: Path(
@@ -137,6 +160,20 @@ class Settings:
                 self.python_pool_name, self.resource_group
             )
         return self.python_endpoint
+
+    def resolved_subscription_id(self) -> str:
+        if not self.subscription_id:
+            self.subscription_id = _run(
+                ["az", "account", "show", "--query", "id", "--output", "tsv"]
+            )
+        return self.subscription_id
+
+    def validate_execution_backend(self) -> None:
+        if self.execution_backend not in SUPPORTED_EXECUTION_BACKENDS:
+            raise ConfigError(
+                f"Unsupported EXECUTION_BACKEND: {self.execution_backend}. "
+                "Use 'dynamic-sessions' or 'sandboxes'."
+            )
 
     def resolved_office_endpoint(self) -> str:
         if not self.office_endpoint:

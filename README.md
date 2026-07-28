@@ -1,6 +1,6 @@
-# AI Workspace 격리형 Sandbox on Azure Container Apps Dynamic Sessions
+# AI Workspace 격리형 Sandbox on Azure Container Apps
 
-AI Workspace가 사용자의 자연어 요청과 첨부파일을 받아 코드를 생성·실행하고, 데이터 분석 및 Office 문서 생성 작업을 격리된 환경에서 수행한 뒤 **검사와 사용자 승인 후에만** 실제 업무 시스템에 반영하기 위한 권장 아키텍처와 실습 자료다.
+AI Workspace가 사용자의 자연어 요청과 첨부파일을 받아 코드를 생성·실행하고, 데이터 분석 및 Office 문서 생성 작업을 Azure Container Apps Dynamic Sessions 또는 ACA Sandboxes의 격리 환경에서 수행한 뒤 **검사와 사용자 승인 후에만** 실제 업무 시스템에 반영하기 위한 권장 아키텍처와 실습 자료다.
 
 ## 문서 구성
 
@@ -9,6 +9,7 @@ AI Workspace가 사용자의 자연어 요청과 첨부파일을 받아 코드�
 | [AI Workspace 권장 아키텍처](docs/AI_Workspace_Dynamic_Sessions_Reference_Architecture.md) | 관리자·아키텍트 | Azure 권장 구조, 보안·격리, 세션·리소스·비용 운영, 모니터링, 제약사항, 대안 비교, 도입 단계 |
 | [실습 1: Python Code Interpreter와 LLM](labs/01_Python_Code_Interpreter_Lab.md) | 관리자·실습 운영자 | 관리자용 Pool·LLM backend 구성과 사용자 API 기반 자연어 코드 생성·실행·승인 검증 |
 | [실습 2: Office Custom Container](labs/02_Office_Custom_Container_Lab.md) | 관리자·실습 운영자 | 관리자용 인프라 구성과 사용자 API 기반 DOCX/PDF/PPTX/XLSX 생성·변환·편집 검증 |
+| [실습 3: ACA Sandboxes (Public Preview)](labs/03_ACA_Sandboxes_Lab.md) | 관리자·실습 운영자 | Python·Office custom disk image와 Sandboxes 전용 사용자 Gateway의 실제 실행·승인 흐름 |
 | [Agent 오케스트레이션 소스](agent/) | 관리자·개발자 | 정책 엔진, Session Broker, LLM client, Artifact Staging, Approval Service |
 | [Python 사용자 Gateway](python_gateway/) | 관리자·개발자 | 자연어·첨부파일 analysis job, 결과 다운로드와 동일 artifact 승인 API 제공 |
 | [Office 이미지 소스](office-container/) | 관리자·개발자 | LibreOffice, Pandoc, Poppler를 포함한 비루트 HTTP 생성·변환·편집 서비스 |

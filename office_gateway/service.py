@@ -10,16 +10,18 @@ import hashlib
 import json
 import mimetypes
 import re
+import shlex
 import subprocess
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 from agent import broker, config, staging
 
@@ -27,6 +29,8 @@ SAFE_USER = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 SAFE_FILE = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 MAX_TITLE_CHARS = 200
 MAX_CONTENT_CHARS = 100_000
+OFFICE_JOB_TTL_SECONDS = 3600
+MAX_ACTIVE_OFFICE_JOBS = 5
 
 
 class GatewayError(RuntimeError):
@@ -42,6 +46,29 @@ class GatewayError(RuntimeError):
         self.status = status
         self.message = message
         self.details = details or {}
+
+
+class OfficeBackendClient(Protocol):
+    identifier: str
+
+    def generate(self, title: str, content: str) -> dict[str, Any]: ...
+
+    def convert(
+        self,
+        job_id: str,
+        source: str,
+        target: str,
+    ) -> dict[str, Any]: ...
+
+    def edit(
+        self,
+        job_id: str,
+        operations: list[dict[str, object]],
+    ) -> dict[str, Any]: ...
+
+    def download(self, path: str) -> tuple[bytes, str]: ...
+
+    def stop(self) -> None: ...
 
 
 class OfficeSessionClient:
@@ -169,6 +196,334 @@ class OfficeSessionClient:
             raise GatewayError(status, "Office session을 종료하지 못했다")
 
 
+class SandboxOfficeClient:
+    """ACA Sandboxes backend for one Office document job."""
+
+    DOWNLOAD_PATH = re.compile(
+        r"^/files/([A-Za-z0-9]{1,64})/([A-Za-z0-9._-]{1,100})$"
+    )
+
+    @property
+    def sandbox_id(self) -> str:
+        return str(self._sandbox.sandbox_id)
+
+    def __init__(
+        self,
+        identifier: str,
+        *,
+        subscription_id: str,
+        resource_group: str,
+        location: str,
+        sandbox_group: str,
+        disk_image_id: str | None = None,
+        group_client: Any | None = None,
+        credential: Any | None = None,
+    ) -> None:
+        self.identifier = identifier
+        self._closed = False
+        self._credential = credential
+        self._owns_credential = credential is None
+        self._client = group_client
+        self._owns_client = group_client is None
+        self._sandbox: Any | None = None
+        try:
+            if self._client is None:
+                try:
+                    from azure.containerapps.sandbox import (
+                        SandboxGroupClient,
+                        endpoint_for_region,
+                    )
+                    from azure.identity import DefaultAzureCredential
+                except ImportError as error:
+                    raise GatewayError(
+                        500,
+                        "ACA Sandboxes SDK가 설치되지 않았다",
+                    ) from error
+                if self._credential is None:
+                    self._credential = DefaultAzureCredential(
+                        exclude_interactive_browser_credential=True
+                    )
+                self._client = SandboxGroupClient(
+                    endpoint_for_region(location),
+                    self._credential,
+                    subscription_id=subscription_id,
+                    resource_group=resource_group,
+                    sandbox_group=sandbox_group,
+                )
+            disk_image_id = disk_image_id or self._latest_office_disk_image()
+            self._sandbox = self._create_sandbox(disk_image_id)
+            runner_source = (
+                Path(__file__)
+                .with_name("sandbox_runner.py")
+                .read_text(encoding="utf-8")
+            )
+            self._sandbox.write_file(
+                "/tmp/office_gateway_runner.py",
+                runner_source,
+            )
+        except Exception as error:
+            cleanup_error: Exception | None = None
+            if self._sandbox is not None:
+                try:
+                    self._sandbox.delete()
+                except Exception as cleanup:
+                    cleanup_error = cleanup
+                finally:
+                    self._sandbox.close()
+            self._close_clients()
+            if isinstance(error, GatewayError):
+                raise
+            raise GatewayError(
+                502,
+                (
+                    "Office Sandbox 생성에 실패했다"
+                    + (
+                        "; server-side auto-delete가 정리를 재시도한다"
+                        if cleanup_error is not None
+                        else ""
+                    )
+                ),
+            ) from error
+
+    def _latest_office_disk_image(self) -> str:
+        images = [
+            image
+            for image in self._client.list_disk_images()
+            if image.labels.get("name", "").startswith("office-")
+            and image.status
+            and image.status.state in {"Ready", "Succeeded"}
+        ]
+        if not images:
+            raise GatewayError(500, "Ready 상태의 Office disk image가 없다")
+        return max(images, key=lambda image: image.labels["name"]).id
+
+    def _create_sandbox(self, disk_image_id: str) -> Any:
+        try:
+            from azure.containerapps.sandbox import (
+                AutoDeletePolicy,
+                AutoSuspendPolicy,
+                EgressPolicy,
+                LifecyclePolicy,
+            )
+        except ImportError as error:
+            raise GatewayError(500, "ACA Sandboxes SDK가 설치되지 않았다") from error
+        request_label = uuid.uuid4().hex
+        sandbox = None
+        try:
+            sandbox = self._client.begin_create_sandbox(
+                disk=None,
+                disk_id=disk_image_id,
+                cpu="2000m",
+                memory="4096Mi",
+                auto_suspend_seconds=300,
+                auto_suspend_mode="Memory",
+                egress_policy=EgressPolicy(
+                    default_action="Deny",
+                    traffic_inspection="Full",
+                ),
+                labels={
+                    "component": "office-gateway",
+                    "gateway-request": request_label,
+                },
+            ).result()
+            sandbox.set_lifecycle_policy(
+                LifecyclePolicy(
+                    auto_suspend=AutoSuspendPolicy(
+                        enabled=True,
+                        interval=300,
+                        mode="Memory",
+                    ),
+                    auto_delete=AutoDeletePolicy(
+                        enabled=True,
+                        delete_interval_seconds=3600,
+                    ),
+                ),
+            )
+            return sandbox
+        except Exception:
+            broker.delete_sandboxes_by_label(
+                self._client,
+                "gateway-request",
+                request_label,
+                known_sandbox=sandbox,
+            )
+            raise
+
+    def _invoke(
+        self,
+        action: str,
+        payload: dict[str, object],
+    ) -> dict[str, Any]:
+        if self._closed or self._sandbox is None:
+            raise GatewayError(410, "Office Sandbox가 이미 종료됐다")
+        try:
+            self._sandbox.ensure_running()
+        except Exception as error:
+            raise GatewayError(502, "Office Sandbox 재개에 실패했다") from error
+        request_path = f"/tmp/office-request-{uuid.uuid4().hex}.json"
+        try:
+            self._sandbox.write_file(
+                request_path,
+                json.dumps(payload, ensure_ascii=False),
+            )
+        except Exception as error:
+            raise GatewayError(
+                502,
+                "Office Sandbox 요청 업로드에 실패했다",
+            ) from error
+        command = " ".join(
+            shlex.quote(value)
+            for value in (
+                "python3",
+                "/tmp/office_gateway_runner.py",
+                action,
+                request_path,
+            )
+        )
+        try:
+            result = self._sandbox.exec(command)
+        except Exception as error:
+            raise GatewayError(502, "Office Sandbox 실행에 실패했다") from error
+        finally:
+            try:
+                self._sandbox.delete_file(request_path)
+            except Exception:
+                pass
+        try:
+            response = json.loads((result.stdout or "").strip())
+        except json.JSONDecodeError as error:
+            raise GatewayError(
+                502,
+                "Office Sandbox 응답 형식이 올바르지 않다",
+            ) from error
+        if result.exit_code != 0:
+            status = response.get("status")
+            message = response.get("error")
+            details = {
+                key: response[key]
+                for key in ("allowed",)
+                if key in response
+            }
+            raise GatewayError(
+                int(status) if isinstance(status, int) else 502,
+                str(message or "Office Sandbox 작업이 실패했다"),
+                details,
+            )
+        if not isinstance(response, dict):
+            raise GatewayError(502, "Office Sandbox 응답은 object여야 한다")
+        return response
+
+    def generate(self, title: str, content: str) -> dict[str, Any]:
+        return self._invoke(
+            "generate",
+            {"title": title, "content": content},
+        )
+
+    def convert(self, job_id: str, source: str, target: str) -> dict[str, Any]:
+        return self._invoke(
+            "convert",
+            {"jobId": job_id, "source": source, "target": target},
+        )
+
+    def edit(
+        self,
+        job_id: str,
+        operations: list[dict[str, object]],
+    ) -> dict[str, Any]:
+        return self._invoke(
+            "edit",
+            {"jobId": job_id, "operations": operations},
+        )
+
+    def download(self, path: str) -> tuple[bytes, str]:
+        match = self.DOWNLOAD_PATH.fullmatch(path)
+        if match is None:
+            raise GatewayError(400, "Office 결과 파일 경로가 올바르지 않다")
+        job_id, filename = match.groups()
+        source_path = f"/work/{job_id}/{filename}"
+        snapshot_path = f"/tmp/download-{uuid.uuid4().hex}"
+        try:
+            self._sandbox.ensure_running()
+            copied = self._sandbox.exec(
+                f"test -f {shlex.quote(source_path)} && "
+                f"test ! -L {shlex.quote(source_path)} && "
+                f"timeout --signal=KILL 30s head -c "
+                f"{staging.MAX_ARTIFACT_BYTES + 1} -- "
+                f"{shlex.quote(source_path)} > {shlex.quote(snapshot_path)}"
+            )
+            if copied.exit_code != 0:
+                raise GatewayError(
+                    502,
+                    "Office 결과 파일 snapshot 생성에 실패했다",
+                )
+            metadata = self._sandbox.stat_file(snapshot_path)
+            if (
+                not isinstance(metadata.size, int)
+                or metadata.size < 0
+                or metadata.size > staging.MAX_ARTIFACT_BYTES
+            ):
+                raise GatewayError(
+                    413,
+                    f"{filename} 크기 metadata가 허용 범위를 벗어났다",
+                )
+            payload = self._sandbox.read_file(snapshot_path)
+            if len(payload) != metadata.size:
+                raise GatewayError(
+                    409,
+                    f"{filename} snapshot 크기가 변경됐다",
+                )
+        except Exception as error:
+            if isinstance(error, GatewayError):
+                raise
+            raise GatewayError(404, "Office 결과 파일을 찾을 수 없다") from error
+        finally:
+            try:
+                self._sandbox.delete_file(snapshot_path)
+            except Exception:
+                pass
+        return (
+            payload,
+            mimetypes.guess_type(filename)[0]
+            or "application/octet-stream",
+        )
+
+    def stop(self) -> None:
+        if self._closed:
+            return
+        try:
+            if self._sandbox is not None:
+                self._sandbox.delete()
+        except Exception as error:
+            if "NotFound" not in str(error) and "not found" not in str(
+                error
+            ).lower():
+                raise GatewayError(
+                    502,
+                    "Office Sandbox를 종료하지 못했다",
+                ) from error
+        self._closed = True
+        if self._sandbox is not None:
+            self._sandbox.close()
+        self._close_clients()
+
+    def abandon(self) -> None:
+        """Release local SDK handles when cloud cleanup is delegated to reaper."""
+        if self._closed:
+            return
+        self._closed = True
+        if self._sandbox is not None:
+            self._sandbox.close()
+        self._close_clients()
+
+    def _close_clients(self) -> None:
+        if self._owns_client and self._client is not None:
+            self._client.close()
+        if self._owns_credential and self._credential is not None:
+            close = getattr(self._credential, "close", None)
+            if callable(close):
+                close()
+
+
 def resolve_office_endpoint(
     resource_group: str,
     pool_name: str,
@@ -206,10 +561,14 @@ class OfficeJob:
     owner: str
     session_identifier: str
     internal_job_id: str
-    client: OfficeSessionClient
+    client: OfficeBackendClient
     files: dict[str, dict[str, object]] = field(default_factory=dict)
     status: str = "draft"
+    backend_stopped: bool = False
+    cleanup_pending: bool = False
     deleted: bool = False
+    created_at: float = field(default_factory=time.time)
+    last_activity_at: float = field(default_factory=time.time)
     lock: threading.RLock = field(default_factory=threading.RLock)
 
 
@@ -218,16 +577,21 @@ class OfficeGatewayService:
 
     def __init__(
         self,
-        client_factory: Callable[[str], OfficeSessionClient],
+        client_factory: Callable[[str], OfficeBackendClient],
         *,
         staging_root: Path,
         approved_root: Path,
+        backend: str = "dynamic-sessions",
+        max_active_jobs: int = MAX_ACTIVE_OFFICE_JOBS,
     ) -> None:
         self.client_factory = client_factory
         self.staging_root = Path(staging_root)
         self.approved_root = Path(approved_root)
+        self.backend = backend
+        self.max_active_jobs = max_active_jobs
         self.jobs: dict[str, OfficeJob] = {}
         self.lock = threading.Lock()
+        self.allocating = 0
 
     @staticmethod
     def validate_user(user: str) -> str:
@@ -268,6 +632,7 @@ class OfficeGatewayService:
                 or not path.startswith("/")
                 or not isinstance(size, int)
                 or size < 1
+                or size > staging.MAX_ARTIFACT_BYTES
                 or not isinstance(sha256, str)
                 or not re.fullmatch(r"[0-9a-f]{64}", sha256)
             ):
@@ -278,6 +643,7 @@ class OfficeGatewayService:
         return merged
 
     def _job(self, user: str, public_id: str) -> OfficeJob:
+        self._cleanup_expired_jobs()
         user = self.validate_user(user)
         with self.lock:
             job = self.jobs.get(public_id)
@@ -285,7 +651,48 @@ class OfficeGatewayService:
             raise GatewayError(404, "문서 작업을 찾을 수 없다")
         if job.owner != user:
             raise GatewayError(404, "문서 작업을 찾을 수 없다")
+        job.last_activity_at = time.time()
         return job
+
+    def _cleanup_expired_jobs(self, now: float | None = None) -> None:
+        current = now or time.time()
+        cutoff = current - OFFICE_JOB_TTL_SECONDS
+        with self.lock:
+            candidates = [
+                job
+                for job in self.jobs.values()
+                if (
+                    not job.deleted
+                    and (
+                        (
+                            job.status != "approved"
+                            and job.last_activity_at < cutoff
+                        )
+                        or (
+                            job.cleanup_pending
+                            and job.last_activity_at < cutoff
+                        )
+                    )
+                )
+            ]
+        for job in candidates:
+            with job.lock:
+                if job.backend_stopped and job.cleanup_pending:
+                    job.cleanup_pending = False
+                if not job.backend_stopped:
+                    try:
+                        job.client.stop()
+                    except GatewayError:
+                        continue
+                    job.backend_stopped = True
+                    job.cleanup_pending = False
+                if job.status == "approved":
+                    continue
+                with self.lock:
+                    if self.jobs.get(job.public_id) is not job:
+                        continue
+                    job.deleted = True
+                    self.jobs.pop(job.public_id, None)
 
     def _ensure_active(self, job: OfficeJob) -> None:
         with self.lock:
@@ -302,7 +709,20 @@ class OfficeGatewayService:
             ],
         }
 
+    def active_sandbox_ids(self) -> set[str]:
+        with self.lock:
+            jobs = list(self.jobs.values())
+        identifiers = set()
+        for job in jobs:
+            if job.deleted or job.backend_stopped:
+                continue
+            sandbox_id = getattr(job.client, "sandbox_id", None)
+            if isinstance(sandbox_id, str) and sandbox_id:
+                identifiers.add(sandbox_id)
+        return identifiers
+
     def create(self, user: str, title: str, content: str) -> dict[str, object]:
+        self._cleanup_expired_jobs()
         user = self.validate_user(user)
         if not isinstance(title, str) or not title.strip():
             raise GatewayError(400, "title이 필요하다")
@@ -312,10 +732,28 @@ class OfficeGatewayService:
             raise GatewayError(400, f"title은 {MAX_TITLE_CHARS}자 이하여야 한다")
         if len(content) > MAX_CONTENT_CHARS:
             raise GatewayError(400, f"content는 {MAX_CONTENT_CHARS}자 이하여야 한다")
+        with self.lock:
+            active_jobs = sum(
+                1
+                for job in self.jobs.values()
+                if (
+                    not job.deleted
+                    and (not job.backend_stopped or job.cleanup_pending)
+                )
+            )
+            if active_jobs + self.allocating >= self.max_active_jobs:
+                raise GatewayError(
+                    429,
+                    "동시 Office Sandbox 작업 한도에 도달했다",
+                )
+            self.allocating += 1
         public_id = uuid.uuid4().hex
         session_identifier = broker.new_session_identifier("office")
-        client = self.client_factory(session_identifier)
+        client: OfficeBackendClient | None = None
+        job: OfficeJob | None = None
+        job_ready = False
         try:
+            client = self.client_factory(session_identifier)
             response = client.generate(title, content)
             if not isinstance(response, dict):
                 raise GatewayError(502, "Office session 응답 형식이 올바르지 않다")
@@ -330,29 +768,36 @@ class OfficeGatewayService:
                 client=client,
             )
             self._merge_files(job, response)
+            job_ready = True
         except (
             GatewayError,
             KeyError,
             TypeError,
             ValueError,
         ) as error:
-            try:
-                client.stop()
-            except GatewayError as cleanup_error:
-                original_message = (
-                    error.message
-                    if isinstance(error, GatewayError)
-                    else "Office session 응답 처리 실패"
-                )
-                raise GatewayError(
-                    502,
-                    f"{original_message}; 실패한 session 정리도 완료하지 못했다",
-                ) from cleanup_error
+            if client is not None:
+                try:
+                    client.stop()
+                except GatewayError as cleanup_error:
+                    original_message = (
+                        error.message
+                        if isinstance(error, GatewayError)
+                        else "Office session 응답 처리 실패"
+                    )
+                    raise GatewayError(
+                        502,
+                        f"{original_message}; 실패한 session 정리도 완료하지 못했다",
+                    ) from cleanup_error
             if isinstance(error, GatewayError):
                 raise
             raise GatewayError(502, "Office session 응답 처리에 실패했다") from error
-        with self.lock:
-            self.jobs[public_id] = job
+        finally:
+            with self.lock:
+                self.allocating -= 1
+                if job is not None and job_ready:
+                    self.jobs[public_id] = job
+        if job is None:
+            raise GatewayError(502, "Office job 생성에 실패했다")
         return self.public_view(job)
 
     def get(self, user: str, public_id: str) -> dict[str, object]:
@@ -429,7 +874,17 @@ class OfficeGatewayService:
                     mimetypes.guess_type(filename)[0]
                     or "application/octet-stream",
                 )
-            return job.client.download(path)
+            payload, content_type = job.client.download(path)
+            expected_hash = metadata.get("sha256")
+            if (
+                not isinstance(expected_hash, str)
+                or staging.sha256_bytes(payload) != expected_hash
+            ):
+                raise GatewayError(
+                    409,
+                    f"{filename}의 hash가 생성 이후 변경됐다",
+                )
+            return payload, content_type
 
     def approve(
         self,
@@ -479,6 +934,22 @@ class OfficeGatewayService:
                 for result in batch
             ]
             job.status = "approved"
+            if not job.backend_stopped:
+                try:
+                    job.client.stop()
+                    job.backend_stopped = True
+                except GatewayError:
+                    # Approval and local promotion are already committed.
+                    # Server-side auto-delete and the next DELETE request retry
+                    # cleanup without invalidating the approved result.
+                    abandon = getattr(job.client, "abandon", None)
+                    if callable(abandon):
+                        abandon()
+                        job.backend_stopped = True
+                    job.cleanup_pending = True
+                    job.last_activity_at = (
+                        time.time() - OFFICE_JOB_TTL_SECONDS - 1
+                    )
             return {
                 "id": public_id,
                 "status": job.status,
@@ -489,7 +960,9 @@ class OfficeGatewayService:
         job = self._job(user, public_id)
         with job.lock:
             self._ensure_active(job)
-            job.client.stop()
+            if not job.backend_stopped:
+                job.client.stop()
+                job.backend_stopped = True
             with self.lock:
                 job.deleted = True
                 self.jobs.pop(public_id, None)

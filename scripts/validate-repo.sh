@@ -37,6 +37,7 @@ for source in (
     sorted(pathlib.Path(".").glob("agent/*.py"))
     + sorted(pathlib.Path(".").glob("office_gateway/*.py"))
     + sorted(pathlib.Path(".").glob("python_gateway/*.py"))
+    + sorted(pathlib.Path(".").glob("scripts/*.py"))
     + sorted(pathlib.Path(".").glob("tests/*.py"))
 ):
     ast.parse(source.read_text(encoding="utf-8"), filename=str(source))

@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from agent import config, orchestrator
+from agent import broker, config, orchestrator
 from .service import GatewayError, PythonGatewayService
 
 MAX_MULTIPART_BYTES = 128 * 1024 * 1024 + 1024 * 1024
@@ -113,7 +113,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             path = urlparse(self.path).path
             if path == "/health":
-                self.send_json(HTTPStatus.OK, {"status": "ok"})
+                self.send_json(
+                    HTTPStatus.OK,
+                    {"status": "ok", "backend": self.service.backend},
+                )
                 return
             parts = self.parts(path)
             if len(parts) == 3 and parts[:2] == ["api", "analysis-jobs"]:
@@ -201,16 +204,38 @@ def build_service() -> PythonGatewayService:
         staging_dir=work_root / "staging",
         approved_dir=work_root / "unused-orchestrator-approved",
     )
+    settings.validate_execution_backend()
     return PythonGatewayService(
         lambda: orchestrator.Orchestrator(settings),
         staging_root=settings.staging_dir,
         approved_root=work_root / "approved",
+        backend=settings.execution_backend,
+        max_active_jobs=int(
+            os.environ.get("MAX_ACTIVE_PYTHON_JOBS", "5")
+        ),
     )
 
 
 def main() -> None:
     host = os.environ.get("PYTHON_GATEWAY_HOST", "127.0.0.1")
     port = int(os.environ.get("PYTHON_GATEWAY_PORT", "8089"))
+    settings = config.Settings()
+    if settings.execution_backend == "sandboxes":
+        try:
+            broker.cleanup_gateway_sandboxes(settings, "python-gateway")
+        except Exception as error:
+            print(
+                json.dumps(
+                    {
+                        "level": "warning",
+                        "message": "Python orphan cleanup failed",
+                        "error": str(error),
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
+        broker.start_gateway_cleanup_loop(settings, "python-gateway")
     Handler.service = build_service()
     server = ThreadingHTTPServer((host, port), Handler)
     print(f"Python user gateway listening on http://{host}:{port}", flush=True)

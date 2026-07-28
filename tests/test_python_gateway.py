@@ -4,9 +4,10 @@ import tempfile
 import unittest
 import subprocess
 from pathlib import Path
+from unittest import mock
 
-from agent import orchestrator, staging
-from python_gateway import service
+from agent import config, orchestrator, staging
+from python_gateway import server, service
 
 
 class FakeRunner:
@@ -139,6 +140,20 @@ class PythonGatewayServiceTests(unittest.TestCase):
             service.MAX_ATTACHMENT_BYTES = original
         self.assertEqual(context.exception.status, 413)
 
+    def test_active_job_limit_rejects_before_runner_allocation(self) -> None:
+        factory = mock.Mock()
+        gateway = service.PythonGatewayService(
+            factory,
+            staging_root=self.root / "limited-staging",
+            approved_root=self.root / "limited-approved",
+            max_active_jobs=1,
+        )
+        gateway.allocating = 1
+        with self.assertRaises(service.GatewayError) as context:
+            gateway.create("user-demo", "분석해줘", {}, ())
+        self.assertEqual(context.exception.status, 429)
+        factory.assert_not_called()
+
     def test_total_attachment_limit_is_an_explicit_gateway_limit(self) -> None:
         original = service.MAX_TOTAL_ATTACHMENT_BYTES
         service.MAX_TOTAL_ATTACHMENT_BYTES = 5
@@ -243,6 +258,30 @@ class PythonGatewayServiceTests(unittest.TestCase):
         self.assertFalse(artifact_path.exists())
         with self.assertRaises(service.GatewayError):
             self.gateway.get("user-demo", public_id)
+
+    def test_build_service_reports_sandboxes_backend(self) -> None:
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "EXECUTION_BACKEND": "sandboxes",
+                "PYTHON_USER_WORK_DIR": str(self.root / "sandbox-service"),
+            },
+            clear=False,
+        ):
+            gateway = server.build_service()
+        self.assertEqual(gateway.backend, "sandboxes")
+
+    def test_build_service_rejects_unknown_backend(self) -> None:
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "EXECUTION_BACKEND": "unknown",
+                "PYTHON_USER_WORK_DIR": str(self.root / "invalid-service"),
+            },
+            clear=False,
+        ):
+            with self.assertRaises(config.ConfigError):
+                server.build_service()
 
 
 if __name__ == "__main__":

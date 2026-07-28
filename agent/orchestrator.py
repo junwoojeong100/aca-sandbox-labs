@@ -197,12 +197,24 @@ class Orchestrator:
                 audit=[entry.as_dict() for entry in audit],
             )
 
-        endpoint = self.settings.resolved_python_endpoint()
-        session = broker.PythonSession(endpoint)
+        session = broker.create_python_session(self.settings)
         audit.append(
             StepLog(
                 "session-allocated",
-                {"pool": self.settings.python_pool_name, "reuse": False},
+                {
+                    "backend": self.settings.execution_backend,
+                    "pool": (
+                        self.settings.python_pool_name
+                        if self.settings.execution_backend == "dynamic-sessions"
+                        else None
+                    ),
+                    "sandboxGroup": (
+                        self.settings.sandbox_group_name
+                        if self.settings.execution_backend == "sandboxes"
+                        else None
+                    ),
+                    "reuse": False,
+                },
             )
         )
 
@@ -323,17 +335,37 @@ class Orchestrator:
                 self.settings.staging_dir, tenant_id, request_id
             )
             listing = session.list_files()
-            available = {
-                str(item.get("name"))
+            available_metadata = {
+                str(item.get("name")): item
                 for item in (listing.get("value") or [])
                 if isinstance(item, dict) and item.get("name")
             }
+            available = set(available_metadata)
             targets = tuple(expected_outputs) or tuple(
                 sorted(available - set(attachments))
             )
             for name in targets:
                 if name not in available:
                     audit.append(StepLog("artifact-missing", {"name": name}))
+                    result.succeeded = False
+                    result.stderr = f"필수 결과 파일이 없다: {name}"
+                    continue
+                size = available_metadata[name].get("size")
+                if (
+                    not isinstance(size, int)
+                    or size < 0
+                    or size > staging.MAX_ARTIFACT_BYTES
+                ):
+                    audit.append(
+                        StepLog(
+                            "artifact-oversized",
+                            {"name": name, "size": size},
+                        )
+                    )
+                    result.succeeded = False
+                    result.stderr = (
+                        f"{name} 크기 metadata가 artifact 허용 범위를 벗어났다"
+                    )
                     continue
                 payload = session.download(name)
                 artifact = store.stage(name, payload)
@@ -343,7 +375,11 @@ class Orchestrator:
             manifest_path = store.write_manifest()
             audit.append(StepLog("manifest", {"path": str(manifest_path)}))
 
-            if approve and store.artifacts:
+            complete_artifact_set = (
+                result.succeeded
+                and len(store.artifacts) == len(targets)
+            )
+            if approve and store.artifacts and complete_artifact_set:
                 result.promotions = staging.promote_batch(
                     store.artifacts,
                     self.settings.approved_dir / request_id,
@@ -372,8 +408,18 @@ class Orchestrator:
             )
             return result
         finally:
-            status = session.delete()
-            audit.append(StepLog("session-deleted", {"httpStatus": status}))
+            try:
+                status = session.delete()
+                audit.append(
+                    StepLog("session-deleted", {"httpStatus": status})
+                )
+            except Exception as error:
+                audit.append(
+                    StepLog(
+                        "session-delete-failed",
+                        {"error": str(error)[:500]},
+                    )
+                )
             result.audit = [entry.as_dict() for entry in audit]
 
 

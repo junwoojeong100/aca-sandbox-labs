@@ -10,7 +10,10 @@ import json
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -330,8 +333,11 @@ class FakeSession:
     def list_files(self) -> dict[str, object]:
         return {
             "value": [
-                *[{"name": name} for name in self.output_files],
-                {"name": "sales.csv"},
+                *[
+                    {"name": name, "size": 1024}
+                    for name in self.output_files
+                ],
+                {"name": "sales.csv", "size": 1024},
             ]
         }
 
@@ -471,12 +477,75 @@ class OrchestratorTests(unittest.TestCase):
         names = {artifact["name"] for artifact in result.artifacts}
         self.assertEqual(names, {"summary.json"})
 
+    def test_oversized_artifact_is_rejected_before_download(self) -> None:
+        class OversizedSession(FakeSession):
+            def list_files(self) -> dict[str, object]:
+                return {
+                    "value": [
+                        {
+                            "name": "summary.json",
+                            "size": staging.MAX_ARTIFACT_BYTES + 1,
+                        }
+                    ]
+                }
+
+            def download(self, name: str) -> bytes:
+                raise AssertionError("oversized artifact must not download")
+
+        result = self._run(
+            OversizedSession(),
+            expected_outputs=("summary.json",),
+        )
+        self.assertFalse(result.succeeded)
+        self.assertIn("허용 범위", result.stderr)
+
+    def test_partial_artifact_set_is_never_promoted(self) -> None:
+        class MixedSession(FakeSession):
+            def list_files(self) -> dict[str, object]:
+                return {
+                    "value": [
+                        {"name": "small.json", "size": 100},
+                        {
+                            "name": "large.bin",
+                            "size": staging.MAX_ARTIFACT_BYTES + 1,
+                        },
+                    ]
+                }
+
+            def download(self, name: str) -> bytes:
+                if name == "large.bin":
+                    raise AssertionError("large artifact must not download")
+                return b'{"ok":true}'
+
+        result = self._run(
+            MixedSession(),
+            expected_outputs=("small.json", "large.bin"),
+            approve=True,
+            approver="user-demo",
+        )
+        self.assertFalse(result.succeeded)
+        self.assertEqual(len(result.artifacts), 1)
+        self.assertFalse(result.promotions[0]["promoted"])
+
     def test_audit_records_session_deletion(self) -> None:
         session = FakeSession()
         result = self._run(session, expected_outputs=("summary.json",))
         steps = [entry["step"] for entry in result.audit]
         self.assertIn("session-deleted", steps)
         self.assertIn("policy", steps)
+
+    def test_cleanup_error_does_not_mask_successful_result(self) -> None:
+        class DeleteFailingSession(FakeSession):
+            def delete(self) -> int:
+                raise subprocess.CalledProcessError(1, ["az"])
+
+        result = self._run(
+            DeleteFailingSession(),
+            expected_outputs=("summary.json",),
+        )
+        self.assertTrue(result.succeeded)
+        steps = [entry["step"] for entry in result.audit]
+        self.assertIn("session-delete-failed", steps)
 
 
 class BrokerIdentifierTests(unittest.TestCase):
@@ -490,6 +559,265 @@ class BrokerIdentifierTests(unittest.TestCase):
     def test_identifier_does_not_embed_user_input(self) -> None:
         identifier = broker.new_session_identifier("py")
         self.assertNotIn("user", identifier)
+
+
+class ExecutionBackendTests(unittest.TestCase):
+    def test_dynamic_sessions_backend_uses_python_session(self) -> None:
+        settings = config.Settings(
+            execution_backend="dynamic-sessions",
+            python_endpoint="https://sessions.example",
+        )
+        sentinel = object()
+        with mock.patch.object(
+            broker,
+            "PythonSession",
+            return_value=sentinel,
+        ) as session_type:
+            self.assertIs(broker.create_python_session(settings), sentinel)
+        session_type.assert_called_once_with("https://sessions.example")
+
+    def test_sandboxes_backend_uses_sandbox_session(self) -> None:
+        settings = config.Settings(execution_backend="sandboxes")
+        sentinel = object()
+        with mock.patch.object(
+            broker,
+            "SandboxesPythonSession",
+            return_value=sentinel,
+        ) as session_type:
+            self.assertIs(broker.create_python_session(settings), sentinel)
+        session_type.assert_called_once_with(settings)
+
+    def test_sandbox_backend_requires_code_interpreter_image(self) -> None:
+        session = broker.SandboxesPythonSession.__new__(
+            broker.SandboxesPythonSession
+        )
+        session.settings = config.Settings(execution_backend="sandboxes")
+        session._client = mock.Mock()
+        session._client.list_disk_images.return_value = []
+        with self.assertRaises(broker.BrokerError):
+            session._create_sandbox()
+        session._client.begin_create_sandbox.assert_not_called()
+
+    def test_unknown_execution_backend_is_rejected(self) -> None:
+        settings = config.Settings(execution_backend="unknown")
+        with self.assertRaises(config.ConfigError):
+            broker.create_python_session(settings)
+
+    def test_sandbox_delete_can_retry_after_transient_failure(self) -> None:
+        class FakeSandbox:
+            def __init__(self) -> None:
+                self.delete_calls = 0
+                self.close_calls = 0
+
+            def delete(self) -> None:
+                self.delete_calls += 1
+                if self.delete_calls == 1:
+                    raise RuntimeError("transient")
+
+            def close(self) -> None:
+                self.close_calls += 1
+
+        session = broker.SandboxesPythonSession.__new__(
+            broker.SandboxesPythonSession
+        )
+        session._closed = False
+        session._sandbox = FakeSandbox()
+        session._client = None
+        session._credential = None
+        session._owns_client = False
+        session._owns_credential = False
+        with self.assertRaises(broker.BrokerError):
+            session.delete()
+        self.assertFalse(session._closed)
+        self.assertEqual(session.delete(), 204)
+        self.assertTrue(session._closed)
+        self.assertEqual(session._sandbox.delete_calls, 2)
+        self.assertEqual(session._sandbox.close_calls, 1)
+
+    def test_startup_cleanup_deletes_matching_gateway_sandboxes(self) -> None:
+        class FakeSandbox:
+            def __init__(self) -> None:
+                self.deleted = False
+                self.closed = False
+
+            def delete(self) -> None:
+                self.deleted = True
+
+            def close(self) -> None:
+                self.closed = True
+
+        matching = SimpleNamespace(
+            id="matching",
+            labels={"component": "python-gateway"},
+            state="Stopped",
+            created_at=(
+                datetime.now(timezone.utc) - timedelta(hours=2)
+            ).isoformat().replace("+00:00", "Z"),
+        )
+        other = SimpleNamespace(
+            id="other",
+            labels={"component": "office-gateway"},
+            state="Stopped",
+            created_at=datetime.now(timezone.utc) - timedelta(hours=2),
+        )
+        sandbox = FakeSandbox()
+        group = mock.Mock()
+        group.list_sandboxes.return_value = [matching, other]
+        group.get_sandbox_client.return_value = sandbox
+        settings = config.Settings(execution_backend="sandboxes")
+        deleted = broker.cleanup_gateway_sandboxes(
+            settings,
+            "python-gateway",
+            group_client=group,
+            credential=object(),
+        )
+        self.assertEqual(deleted, 1)
+        group.get_sandbox_client.assert_called_once_with("matching")
+        self.assertTrue(sandbox.deleted)
+        self.assertTrue(sandbox.closed)
+
+    def test_startup_cleanup_keeps_recent_or_running_sandboxes(self) -> None:
+        recent = SimpleNamespace(
+            id="recent",
+            labels={"component": "python-gateway"},
+            state="Stopped",
+            created_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+        )
+        running = SimpleNamespace(
+            id="running",
+            labels={"component": "python-gateway"},
+            state="Running",
+            created_at=datetime.now(timezone.utc) - timedelta(hours=2),
+        )
+        suspended = SimpleNamespace(
+            id="suspended",
+            labels={"component": "other-gateway"},
+            state="Suspended",
+            created_at=(
+                datetime.now(timezone.utc) - timedelta(hours=2)
+            ).isoformat(),
+        )
+        group = mock.Mock()
+        group.list_sandboxes.return_value = [recent, running, suspended]
+        settings = config.Settings(execution_backend="sandboxes")
+        deleted = broker.cleanup_gateway_sandboxes(
+            settings,
+            "python-gateway",
+            group_client=group,
+            credential=object(),
+        )
+        self.assertEqual(deleted, 0)
+        group.get_sandbox_client.assert_not_called()
+
+    def test_startup_cleanup_deletes_old_suspended_sandbox(self) -> None:
+        resource = SimpleNamespace(
+            id="suspended",
+            labels={"component": "python-gateway"},
+            state="Suspended",
+            created_at=(
+                datetime.now(timezone.utc) - timedelta(hours=2)
+            ).isoformat(),
+        )
+        sandbox = mock.Mock()
+        group = mock.Mock()
+        group.list_sandboxes.return_value = [resource]
+        group.get_sandbox_client.return_value = sandbox
+        settings = config.Settings(execution_backend="sandboxes")
+        deleted = broker.cleanup_gateway_sandboxes(
+            settings,
+            "python-gateway",
+            group_client=group,
+            credential=object(),
+        )
+        self.assertEqual(deleted, 1)
+        sandbox.delete.assert_called_once()
+        sandbox.close.assert_called_once()
+
+    def test_partial_creation_cleanup_waits_for_late_visibility(self) -> None:
+        resource = SimpleNamespace(
+            id="late",
+            labels={"gateway-request": "request"},
+        )
+
+        class FakeSandbox:
+            def __init__(self) -> None:
+                self.deleted = False
+                self.closed = False
+
+            def delete(self) -> None:
+                self.deleted = True
+
+            def close(self) -> None:
+                self.closed = True
+
+        sandbox = FakeSandbox()
+        group = mock.Mock()
+        group.list_sandboxes.side_effect = [[], [], [], [resource]]
+        group.get_sandbox_client.return_value = sandbox
+        broker.delete_sandboxes_by_label(
+            group,
+            "gateway-request",
+            "request",
+            attempts=4,
+            delay_seconds=0,
+        )
+        self.assertEqual(group.list_sandboxes.call_count, 4)
+        self.assertTrue(sandbox.deleted)
+        self.assertTrue(sandbox.closed)
+
+    def test_partial_creation_cleanup_preserves_unresolved_error(self) -> None:
+        class FailingSandbox:
+            def delete(self) -> None:
+                raise RuntimeError("still deleting")
+
+            def close(self) -> None:
+                return
+
+        group = mock.Mock()
+        group.list_sandboxes.return_value = []
+        with self.assertRaises(broker.BrokerError):
+            broker.delete_sandboxes_by_label(
+                group,
+                "gateway-request",
+                "request",
+                known_sandbox=FailingSandbox(),
+                attempts=2,
+                delay_seconds=0,
+            )
+
+    def test_orphan_cleanup_continues_after_one_delete_failure(self) -> None:
+        first = SimpleNamespace(
+            id="first",
+            labels={"component": "python-gateway"},
+            state="Stopped",
+            created_at=(
+                datetime.now(timezone.utc) - timedelta(hours=2)
+            ).isoformat(),
+        )
+        second = SimpleNamespace(
+            id="second",
+            labels={"component": "python-gateway"},
+            state="Stopped",
+            created_at=(
+                datetime.now(timezone.utc) - timedelta(hours=2)
+            ).isoformat(),
+        )
+        failing = mock.Mock()
+        failing.delete.side_effect = RuntimeError("transient")
+        succeeding = mock.Mock()
+        group = mock.Mock()
+        group.list_sandboxes.return_value = [first, second]
+        group.get_sandbox_client.side_effect = [failing, succeeding]
+        settings = config.Settings(execution_backend="sandboxes")
+        with self.assertRaises(broker.BrokerError):
+            broker.cleanup_gateway_sandboxes(
+                settings,
+                "python-gateway",
+                group_client=group,
+                credential=object(),
+            )
+        succeeding.delete.assert_called_once()
+        succeeding.close.assert_called_once()
 
 
 if __name__ == "__main__":

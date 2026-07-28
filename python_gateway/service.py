@@ -19,6 +19,7 @@ MAX_REQUEST_CHARS = 20_000
 MAX_ATTACHMENTS = 10
 MAX_ATTACHMENT_BYTES = 128 * 1024 * 1024
 MAX_TOTAL_ATTACHMENT_BYTES = 128 * 1024 * 1024
+MAX_ACTIVE_PYTHON_JOBS = 5
 INTERNAL_PATH = re.compile(
     r"(?<!\w)/(?:mnt/data|Users|home|tmp|var)(?:/[^\s'\";,)\]]+)*"
 )
@@ -52,12 +53,17 @@ class PythonGatewayService:
         *,
         staging_root: Path,
         approved_root: Path,
+        backend: str = "dynamic-sessions",
+        max_active_jobs: int = MAX_ACTIVE_PYTHON_JOBS,
     ) -> None:
         self.runner_factory = runner_factory
         self.staging_root = Path(staging_root).resolve()
         self.approved_root = Path(approved_root)
+        self.backend = backend
+        self.max_active_jobs = max_active_jobs
         self.jobs: dict[str, AnalysisJob] = {}
         self.lock = threading.Lock()
+        self.allocating = 0
 
     @staticmethod
     def validate_user(user: str) -> str:
@@ -161,6 +167,13 @@ class PythonGatewayService:
     ) -> dict[str, object]:
         user = self.validate_user(user)
         self._validate_inputs(request_text, attachments, expected_outputs)
+        with self.lock:
+            if self.allocating >= self.max_active_jobs:
+                raise GatewayError(
+                    429,
+                    "동시 Python Sandbox 작업 한도에 도달했다",
+                )
+            self.allocating += 1
         try:
             result = self.runner_factory().run(
                 request_text,
@@ -179,6 +192,9 @@ class PythonGatewayService:
             subprocess.TimeoutExpired,
         ) as error:
             raise GatewayError(502, "분석 backend 실행에 실패했다") from error
+        finally:
+            with self.lock:
+                self.allocating -= 1
 
         public_id = uuid.uuid4().hex
         status = "completed" if result.succeeded else "failed"

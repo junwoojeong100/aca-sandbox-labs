@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+from agent import broker, config
 from .service import (
     GatewayError,
     OfficeGatewayService,
+    SandboxOfficeClient,
     OfficeSessionClient,
     resolve_office_endpoint,
 )
@@ -69,7 +72,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             path = urlparse(self.path).path
             if path == "/health":
-                self.send_json(HTTPStatus.OK, {"status": "ok"})
+                self.send_json(
+                    HTTPStatus.OK,
+                    {"status": "ok", "backend": self.service.backend},
+                )
                 return
 
             parts = self.parts(path)
@@ -167,30 +173,117 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def build_service() -> OfficeGatewayService:
+    backend = os.environ.get(
+        "EXECUTION_BACKEND",
+        "dynamic-sessions",
+    ).strip().lower()
+    if backend not in {"dynamic-sessions", "sandboxes"}:
+        raise RuntimeError(
+            "EXECUTION_BACKEND must be dynamic-sessions or sandboxes"
+        )
     resource_group = os.environ.get(
         "RESOURCE_GROUP",
         "rg-ai-workspace-sandbox-lab",
     )
-    pool_name = os.environ.get(
-        "OFFICE_POOL_NAME",
-        "ai-workspace-office-sbx",
-    )
-    endpoint = os.environ.get("OFFICE_ENDPOINT") or resolve_office_endpoint(
-        resource_group,
-        pool_name,
-    )
     work_root = Path(os.environ.get("OFFICE_USER_WORK_DIR", ".work/office-user"))
+    if backend == "sandboxes":
+        subscription_id = os.environ.get("SUBSCRIPTION_ID")
+        if not subscription_id:
+            result = subprocess.run(
+                [
+                    "az",
+                    "account",
+                    "show",
+                    "--query",
+                    "id",
+                    "--output",
+                    "tsv",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            subscription_id = result.stdout.strip()
+        location = os.environ.get("LOCATION", "koreacentral")
+        sandbox_group = os.environ.get(
+            "SANDBOX_GROUP_NAME",
+            "ai-workspace-sandboxes",
+        )
+        disk_image_id = os.environ.get("OFFICE_SANDBOX_DISK_ID")
+        client_factory = lambda identifier: SandboxOfficeClient(
+            identifier,
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            location=location,
+            sandbox_group=sandbox_group,
+            disk_image_id=disk_image_id,
+        )
+    else:
+        pool_name = os.environ.get(
+            "OFFICE_POOL_NAME",
+            "ai-workspace-office-sbx",
+        )
+        endpoint = os.environ.get("OFFICE_ENDPOINT") or resolve_office_endpoint(
+            resource_group,
+            pool_name,
+        )
+        client_factory = lambda identifier: OfficeSessionClient(
+            endpoint,
+            identifier,
+        )
     return OfficeGatewayService(
-        lambda identifier: OfficeSessionClient(endpoint, identifier),
+        client_factory,
         staging_root=work_root / "staging",
         approved_root=work_root / "approved",
+        backend=backend,
     )
 
 
 def main() -> None:
     host = os.environ.get("OFFICE_GATEWAY_HOST", "127.0.0.1")
     port = int(os.environ.get("OFFICE_GATEWAY_PORT", "8090"))
+    settings = config.Settings(
+        execution_backend=os.environ.get(
+            "EXECUTION_BACKEND",
+            "dynamic-sessions",
+        ).strip().lower(),
+        resource_group=os.environ.get(
+            "RESOURCE_GROUP",
+            "rg-ai-workspace-sandbox-lab",
+        ),
+        location=os.environ.get("LOCATION", "koreacentral"),
+        sandbox_group_name=os.environ.get(
+            "SANDBOX_GROUP_NAME",
+            "ai-workspace-sandboxes",
+        ),
+        subscription_id=os.environ.get("SUBSCRIPTION_ID"),
+    )
     Handler.service = build_service()
+    if settings.execution_backend == "sandboxes":
+        try:
+            broker.cleanup_gateway_sandboxes(
+                settings,
+                "office-gateway",
+                exclude_ids=Handler.service.active_sandbox_ids(),
+            )
+        except Exception as error:
+            print(
+                json.dumps(
+                    {
+                        "level": "warning",
+                        "message": "Office orphan cleanup failed",
+                        "error": str(error),
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
+        broker.start_gateway_cleanup_loop(
+            settings,
+            "office-gateway",
+            exclude_ids_provider=Handler.service.active_sandbox_ids,
+        )
     server = ThreadingHTTPServer((host, port), Handler)
     print(f"Office user gateway listening on http://{host}:{port}", flush=True)
     server.serve_forever()

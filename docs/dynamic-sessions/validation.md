@@ -4,6 +4,60 @@
 platform 동작을 보장하는 문서가 아니라 regression 계획을 위한 근거다.
 배포 결정을 내리기 전에 현재 Fast Path를 다시 실행한다.
 
+## 2026-07-29, 한국 중부, 분리된 전용 Resource Group
+
+검증 환경:
+
+- Resource Group: `rg-ai-workspace-dynamic-sessions-lab`
+- Python Pool: `ai-workspace-python-sbx`
+- Office Pool: `ai-workspace-office-sbx`
+- ACR: `aiwsds5153160423374c05bc05`, admin user 비활성화
+- Offline test: 133개 통과
+
+실제 실행에서 발견하고 수정한 항목:
+
+- 과거 공용 ACR 이름과 충돌하지 않도록 Dynamic Sessions 기본 ACR prefix를
+  `aiwsds`로 분리
+- Dynamic Sessions file API가 `sizeInBytes`를 반환하지만 공통 orchestrator가
+  `size`를 기대해 Gateway artifact 회수가 실패했다. Dynamic client에서
+  metadata를 정규화하고 회귀 테스트를 추가
+
+### Python Code Interpreter
+
+| 항목 | 결과 |
+| --- | --- |
+| Pool | `Succeeded`, `EgressDisabled`, max session 10 |
+| CSV 분석 | 월별 합계 200/240/240 |
+| Artifact | PNG·JSON download와 SHA-256 검증 |
+| Egress | 차단 |
+| Isolation | 두 session 간 file 격리 |
+| 오류 수정 | 첫 실패 후 수정 실행 성공 |
+| Cleanup | validation session과 Gateway session 삭제 |
+
+### Office Custom Container
+
+| 항목 | 결과 |
+| --- | --- |
+| OCI image | `office-sandbox:20260729005500` |
+| Image digest | `sha256:107a861188f1541586e47732bb446956d1781799c38f919065320432fa1285f9` |
+| Pool | `Succeeded`, `EgressDisabled`, `nodeCount=1`, ready 1 |
+| 생성 | DOCX, PDF, PPTX, XLSX |
+| 변환 | PPTX→PDF, 허용 목록 강제 |
+| 편집 | DOCX·PPTX text, XLSX cell·sheet, `runShell` 거부 |
+| Probe·log·metric | 통과 |
+| Cleanup | validation session과 Gateway session stop |
+
+### 사용자 Gateway와 Agent
+
+| 경로 | 검증 결과 |
+| --- | --- |
+| Python Gateway | health, create, PNG·JSON, download, approve, delete |
+| Office Gateway | health, create, PDF download, convert, edit, reject, approve, delete |
+| Agent | policy routing, 실제 Pool 실행, unapproved promotion 차단, approval, retry, retry limit, identifier 비노출 |
+
+테스트 완료 후 전용 Resource Group 전체를 삭제해 Pool, E16 capacity, ACR,
+Environment와 Log Analytics를 정리한다.
+
 ## 2026-07-24~2026-07-25, 한국 중부
 
 ### Python Code Interpreter

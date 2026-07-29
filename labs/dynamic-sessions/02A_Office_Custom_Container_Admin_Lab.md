@@ -82,7 +82,7 @@ ACR 이름은 Azure 전체에서 고유한 영문 소문자와 숫자 조합이�
 export SUBSCRIPTION_ID="${SUBSCRIPTION_ID:-$(az account show --query id --output tsv)}"
 export RESOURCE_GROUP="rg-ai-workspace-dynamic-sessions-lab"
 export LOCATION="koreacentral"
-export ACR_NAME="${ACR_NAME:-aiws$(printf '%s' "$SUBSCRIPTION_ID" | tr -d '-' | cut -c1-20)}"
+export ACR_NAME="${ACR_NAME:-aiwsds$(printf '%s' "$SUBSCRIPTION_ID" | tr -d '-' | cut -c1-20)}"
 export IDENTITY_NAME="id-ai-workspace-office-acr-pull"
 export LOG_WORKSPACE_NAME="log-ai-workspace-sandbox"
 export CONTAINER_ENV_NAME="env-ai-workspace-sandbox"

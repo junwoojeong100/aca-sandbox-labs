@@ -185,6 +185,19 @@ class DynamicPythonSessionTests(unittest.TestCase):
             session.upload("large.csv", b"x" * (128 * 1024 * 1024 + 1))
         request.assert_not_called()
 
+    def test_file_list_normalizes_size_in_bytes(self) -> None:
+        payload = b'{"value":[{"name":"summary.json","sizeInBytes":42}]}'
+        with mock.patch.object(
+            python_session,
+            "_request",
+            return_value=(200, payload, "application/json"),
+        ):
+            listing = python_session.PythonSession(
+                self.settings,
+                "py-test",
+            ).list_files()
+        self.assertEqual(listing["value"][0]["size"], 42)
+
     def test_delete_is_idempotent(self) -> None:
         session = python_session.PythonSession(self.settings, "py-test")
         with mock.patch.object(

@@ -192,7 +192,17 @@ class PythonSession:
 
     def list_files(self) -> dict[str, Any]:
         status, payload, _ = _request("GET", self._url("files"))
-        return _json_or_raise(status, payload, "List files")
+        result = _json_or_raise(status, payload, "List files")
+        values = result.get("value")
+        if isinstance(values, list):
+            for item in values:
+                if (
+                    isinstance(item, dict)
+                    and "size" not in item
+                    and isinstance(item.get("sizeInBytes"), int)
+                ):
+                    item["size"] = item["sizeInBytes"]
+        return result
 
     def download(self, name: str) -> bytes:
         encoded = urllib.parse.quote(name)

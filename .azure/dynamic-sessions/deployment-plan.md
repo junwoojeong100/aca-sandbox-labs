@@ -34,3 +34,14 @@ bash scripts/dynamic-sessions/cleanup.sh
 ## 검증 근거
 
 실제 검증 결과는 `docs/dynamic-sessions/validation.md`에 기록한다.
+
+## 2026-07-29 실제 검증
+
+- 전용 Resource Group에서 Python 및 Office Session Pool 생성
+- Python 분석·egress·isolation·retry·cleanup 성공
+- Office 생성·변환·편집·probe·log·metric·cleanup 성공
+- Python·Office 사용자 Gateway 전체 REST 흐름 성공
+- Agent policy·retry·approval·cleanup 성공
+- Office Pool 최종 metric ready 1, executing 0, pending 0
+- 테스트 종료 후 전용 Resource Group 전체 삭제를 요청했으나 destructive
+  confirmation 응답을 받지 못해 삭제 대기

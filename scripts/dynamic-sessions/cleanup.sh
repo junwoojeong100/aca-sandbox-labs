@@ -9,5 +9,18 @@ RESOURCE_GROUP=${RESOURCE_GROUP:-rg-ai-workspace-dynamic-sessions-lab}
 
 az group show --name "$RESOURCE_GROUP" --output none
 az group delete --name "$RESOURCE_GROUP" --yes --no-wait
-az group wait --name "$RESOURCE_GROUP" --deleted --interval 30 --timeout 1200
-log "Deleted resource group: $RESOURCE_GROUP"
+
+for attempt in $(seq 1 40); do
+  if ! az group show --name "$RESOURCE_GROUP" --output none 2>/dev/null; then
+    log "Deleted resource group: $RESOURCE_GROUP"
+    exit 0
+  fi
+  state=$(az group show \
+    --name "$RESOURCE_GROUP" \
+    --query properties.provisioningState \
+    --output tsv 2>/dev/null || true)
+  log "Waiting for resource group deletion ($attempt/40, state=$state)"
+  sleep 30
+done
+
+die "Timed out waiting for resource group deletion: $RESOURCE_GROUP"

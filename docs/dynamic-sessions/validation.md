@@ -21,6 +21,9 @@ platform 동작을 보장하는 문서가 아니라 regression 계획을 위한 
 - Dynamic Sessions file API가 `sizeInBytes`를 반환하지만 공통 orchestrator가
   `size`를 기대해 Gateway artifact 회수가 실패했다. Dynamic client에서
   metadata를 정규화하고 회귀 테스트를 추가
+- 기존 cleanup의 `az group wait --deleted`가 Resource Group이 아직
+  `Deleting`인데 완료를 반환했다. `az group show`가 실제 404를 반환할 때까지
+  polling하도록 수정
 
 ### Python Code Interpreter
 
@@ -56,7 +59,8 @@ platform 동작을 보장하는 문서가 아니라 regression 계획을 위한 
 | Agent | policy routing, 실제 Pool 실행, unapproved promotion 차단, approval, retry, retry limit, identifier 비노출 |
 
 테스트 완료 후 전용 Resource Group 전체를 삭제해 Pool, E16 capacity, ACR,
-Environment와 Log Analytics를 정리한다.
+Environment와 Log Analytics를 정리했고 Resource Group과 ACR 부재를
+확인했다.
 
 ## 2026-07-24~2026-07-25, 한국 중부
 

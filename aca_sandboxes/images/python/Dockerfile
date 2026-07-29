@@ -12,8 +12,8 @@ RUN apt-get update \
     && pip check
 
 RUN useradd --create-home --uid 10001 app \
-    && mkdir -p /mnt/data \
-    && chown -R app:app /mnt/data
+    && mkdir -p /mnt/data /work \
+    && chown -R app:app /mnt/data /work
 
 USER app
 ENV HOME=/home/app

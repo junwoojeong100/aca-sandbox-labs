@@ -98,6 +98,17 @@ class ACASandboxesPolicyTests(unittest.TestCase):
 
 
 class ACAPythonSessionTests(unittest.TestCase):
+    def test_python_image_work_directories_are_writable_by_app(self) -> None:
+        dockerfile = (
+            Path(__file__).resolve().parents[2]
+            / "aca_sandboxes"
+            / "images"
+            / "python"
+            / "Dockerfile"
+        ).read_text(encoding="utf-8")
+        self.assertIn("mkdir -p /mnt/data /work", dockerfile)
+        self.assertIn("chown -R app:app /mnt/data /work", dockerfile)
+
     @staticmethod
     def _session(sandbox) -> python_session.PythonSession:
         session = python_session.PythonSession.__new__(

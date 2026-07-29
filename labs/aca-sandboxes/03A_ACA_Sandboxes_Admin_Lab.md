@@ -95,7 +95,7 @@ Fast Path는 Ready disk image가 없을 때 아래 수동 명령과 같은 ACR b
 disk image 등록을 자동 수행한다.
 
 ```bash
-export ACR_NAME="${ACR_NAME:-aiwssbx$(printf '%s' "$SUBSCRIPTION_ID" | tr -d '-' | cut -c1-20)}"
+export ACR_NAME="${ACR_NAME:-aiwsaca$(printf '%s' "$SUBSCRIPTION_ID" | tr -d '-' | cut -c1-20)}"
 export PYTHON_IMAGE_TAG="$(date -u +%Y%m%d%H%M%S)"
 
 az acr show \

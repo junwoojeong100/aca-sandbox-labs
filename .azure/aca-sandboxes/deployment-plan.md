@@ -38,3 +38,14 @@ CONFIRM_DELETE=yes \
 ## 검증 근거
 
 실제 검증 결과는 `docs/aca-sandboxes/validation.md`에 기록한다.
+
+## 2026-07-29 실제 검증
+
+- 전용 Resource Group과 SandboxGroup 생성
+- `Container Apps SandboxGroup Data Owner` RBAC 확인
+- Python 및 Office ACR cloud build와 disk image 등록 성공
+- Python 실행·file I/O·egress·isolation·suspend/resume 성공
+- Office 생성·변환·편집·egress·suspend/resume 성공
+- Python·Office 사용자 Gateway 전체 REST 흐름 성공
+- Agent policy·retry·approval·cleanup 성공
+- 검증 종료 시 active Sandbox 0건, snapshot 0건

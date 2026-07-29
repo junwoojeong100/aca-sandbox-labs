@@ -4,6 +4,70 @@
 당시 service와 SDK는 Preview였으므로, 현재 호환성을 보장하는 문서가 아니라
 regression 근거로 사용한다.
 
+## 2026-07-29, 한국 중부, 분리된 전용 Resource Group
+
+검증 환경:
+
+- Resource Group: `rg-ai-workspace-aca-sandboxes-lab`
+- SandboxGroup: `ai-workspace-sandboxes`
+- ACR: `aiwsaca5153160423374c05bc05`, admin user 비활성화
+- SDK: `azure-containerapps-sandbox==0.1.0b4`
+- Offline test: 132개 통과
+
+### Python Quick Start
+
+첫 실행에서 image의 `/work` directory가 app user에게 쓰기 불가해
+`PermissionError`가 발생했다. 다음을 수정한 뒤 새 immutable tag로
+재검증했다.
+
+- `aca_sandboxes/images/python/Dockerfile`에서 `/mnt/data`와 `/work`를
+  app user 소유로 생성
+- `PYTHON_IMAGE_TAG` 지정 시 해당 release를 build·선택하도록 script 수정
+
+| 항목 | 결과 |
+| --- | --- |
+| OCI image | `python-code-interpreter:20260729003100` |
+| Image digest | `sha256:713dd2cc2285cbfe2e1a4c260048796ff2fe0059154d217bd37279724019246a` |
+| Disk image | `956c095c-b94d-467c-9527-0328ec45b7bb`, `Ready` |
+| Python | 3.12.13 |
+| CSV 분석 | 월별 합계 200/240/240 |
+| Egress | `EGRESS_BLOCKED HTTPError` |
+| Isolation | 통과 |
+| Suspend/resume | `Stopped` → `Running`, file state 보존 |
+| 종료 상태 | 검증용 Sandbox 삭제 |
+
+### Office Quick Start
+
+| 항목 | 결과 |
+| --- | --- |
+| OCI image | `office-sandbox:20260729003500` |
+| Image digest | `sha256:c9f09566e6215a210a818fe53006d089812457631f29faf4fbe701cc581497f9` |
+| Disk image | `59e2f8ab-c0a7-44b9-8f34-5aa86e00566a`, `Ready` |
+| Tool | LibreOffice 7.4.7.2, Pandoc 2.17.1.1, Poppler 22.12.0 |
+| 생성 | DOCX, PDF, PPTX, XLSX, slide PDF |
+| 편집 | DOCX·PPTX text, XLSX cell·sheet |
+| PDF text | 검증 통과 |
+| Egress | `EGRESS_BLOCKED HTTPError` |
+| Suspend/resume | state 보존 |
+| 종료 상태 | 검증용 Sandbox 삭제 |
+
+### 사용자 Gateway와 Agent
+
+| 경로 | 검증 결과 |
+| --- | --- |
+| Python Gateway | health, create, PNG·JSON, download, approve, delete |
+| Office Gateway | health, create, PDF download, PPTX→PDF, edit, `runShell` 거부, approve, delete |
+| Agent | policy routing, 실제 Sandbox 실행, unapproved promotion 차단, approval, retry, retry limit, identifier 비노출 |
+
+최종 ACA data plane inventory:
+
+- active Sandbox: 0
+- snapshot: 0
+- Ready disk image: 3
+
+첫 실패 image `python-code-interpreter-20260729002615`는 원인 추적을 위해
+보존했다. 비용 최소화가 필요하면 관리자가 확인 후 삭제한다.
+
 ## 2026-07-28, 한국 중부
 
 검증 환경:

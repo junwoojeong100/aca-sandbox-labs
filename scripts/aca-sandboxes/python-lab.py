@@ -252,6 +252,7 @@ def ensure_python_disk_image(
     repo_root: Path,
     evidence: dict[str, object],
 ) -> object:
+    requested_tag = os.environ.get("PYTHON_IMAGE_TAG")
     python_images = [
         image
         for image in list_disk_images_with_retry(client)
@@ -261,18 +262,28 @@ def ensure_python_disk_image(
         and image.status
         and image.status.state in {"Ready", "Succeeded"}
     ]
-    existing = max(
-        python_images,
-        key=lambda image: image.labels["name"],
-        default=None,
-    )
+    if requested_tag:
+        requested_name = f"python-code-interpreter-{requested_tag}"
+        existing = next(
+            (
+                image
+                for image in python_images
+                if image.labels.get("name") == requested_name
+            ),
+            None,
+        )
+    else:
+        existing = max(
+            python_images,
+            key=lambda image: image.labels["name"],
+            default=None,
+        )
     if existing is not None:
         evidence["source_image"] = str(existing.image.base)
         evidence["disk_image_auth"] = "existing disk image"
         return existing
 
     ensure_acr(acr_name, resource_group, location)
-    requested_tag = os.environ.get("PYTHON_IMAGE_TAG")
     image_tag = requested_tag or datetime.now(timezone.utc).strftime(
         "%Y%m%d%H%M%S"
     )
@@ -340,7 +351,7 @@ def main() -> None:
         "SANDBOX_GROUP_NAME", "ai-workspace-sandboxes"
     )
     acr_name = os.environ.get(
-        "ACR_NAME", f"aiwssbx{subscription_id.replace('-', '')[:20]}"
+        "ACR_NAME", f"aiwsaca{subscription_id.replace('-', '')[:20]}"
     )
     repository = os.environ.get(
         "PYTHON_IMAGE_REPOSITORY",

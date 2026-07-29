@@ -186,7 +186,7 @@ def main() -> None:
         "SANDBOX_GROUP_NAME", "ai-workspace-sandboxes"
     )
     acr_name = os.environ.get(
-        "ACR_NAME", f"aiwssbx{subscription_id.replace('-', '')[:20]}"
+        "ACR_NAME", f"aiwsaca{subscription_id.replace('-', '')[:20]}"
     )
     repository = os.environ.get("IMAGE_REPOSITORY", "office-sandbox")
     work_dir = Path(

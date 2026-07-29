@@ -159,7 +159,7 @@ curl --fail-with-body --silent --show-error \
 jq '.status, .promotions' .work/dynamic-sessions/python-user/approved.json
 ```
 
-승인은 코드를 다시 실행하지 않는다. 최초 실행에서 staging한 artifact의 hash를 다시 확인하고 같은 파일만 `.work/dynamic-sessions/python-user-api/approved/`로 승격한다.
+승인은 코드를 다시 실행하지 않는다. 최초 실행에서 staging한 artifact의 hash를 다시 확인하고 같은 파일만 `.work/dynamic-sessions/python-user/approved/`로 승격한다.
 
 ## 6. 오류 복구와 정책 거부
 
